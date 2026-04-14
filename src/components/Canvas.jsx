@@ -177,7 +177,7 @@ export default function Canvas({
   const handleWheel = useCallback((e) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -5 : 5;
-    onZoomChange?.((prev) => Math.max(25, Math.min(200, prev + delta)));
+    onZoomChange?.((prev) => Math.max(1, Math.min(200, prev + delta)));
   }, [onZoomChange]);
 
   useEffect(() => {

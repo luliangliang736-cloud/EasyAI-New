@@ -46,7 +46,7 @@ export default function Toolbar({ activeTool, onToolChange, zoom, onZoomChange }
       <div className="w-px h-6 bg-border-primary mx-1" />
 
       <button
-        onClick={() => onZoomChange((z) => Math.max(z - 10, 25))}
+        onClick={() => onZoomChange((z) => Math.max(z - 10, 1))}
         className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
         title="缩小"
       >

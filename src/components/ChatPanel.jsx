@@ -5,10 +5,13 @@ import {
   Send,
   ImagePlus,
   X,
+  Plus,
   Sun,
   Moon,
   Settings2,
   ChevronDown,
+  Search,
+  MessageSquareText,
   Loader2,
   AlertCircle,
   RotateCw,
@@ -18,6 +21,7 @@ import {
   Zap,
   Crown,
   Rocket,
+  Trash2,
 } from "lucide-react";
 import { compressImage } from "@/lib/imageUtils";
 
@@ -126,11 +130,22 @@ function ImageLightbox({ src, onClose }) {
   );
 }
 
-function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, onPauseGenerate }) {
+function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, onPauseGenerate, onDelete }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[85%] bg-accent/15 border border-accent/20 rounded-2xl rounded-tr-md px-4 py-2.5">
+        <div className="max-w-[85%] group/message">
+          <div className="flex justify-end mb-1">
+            <button
+              type="button"
+              onClick={() => onDelete?.(message.id)}
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover/message:opacity-100"
+              title="删除记录"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+          <div className="bg-accent/15 border border-accent/20 rounded-2xl rounded-tr-md px-4 py-2.5">
           {message.refImages?.length > 0 && (
             <div className="flex gap-1.5 mb-2 flex-wrap">
               {message.refImages.map((src, i) => (
@@ -150,18 +165,27 @@ function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, 
             </span>
           </div>
         </div>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="flex justify-start animate-fade-in">
-      <div className="max-w-[85%] w-full">
+      <div className="max-w-[85%] w-full group/message">
         <div className="flex items-center gap-2 mb-2">
           <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center flex-shrink-0">
             <Sparkles size={12} className="text-white" />
           </div>
           <span className="text-xs text-text-secondary font-medium">AI Agent</span>
+          <button
+            type="button"
+            onClick={() => onDelete?.(message.id)}
+            className="ml-auto w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover/message:opacity-100"
+            title="删除记录"
+          >
+            <Trash2 size={13} />
+          </button>
         </div>
 
         {message.status === "generating" && (
@@ -251,6 +275,12 @@ function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, 
 }
 
 export default function ChatPanel({
+  conversations = [],
+  activeConversationId,
+  onSelectConversation,
+  onNewConversation,
+  onDeleteConversation,
+  onDeleteMessage,
   messages, prompt, onPromptChange, onSubmit, isGenerating,
   params, onParamsChange, showParams, onToggleParams,
   refImages, onRefImagesChange,
@@ -261,17 +291,57 @@ export default function ChatPanel({
 }) {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const conversationMenuRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [previewSrc, setPreviewSrc] = useState(null);
+  const [showConversationMenu, setShowConversationMenu] = useState(false);
+  const [conversationSearch, setConversationSearch] = useState("");
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!showConversationMenu) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event) => {
+      if (!conversationMenuRef.current?.contains(event.target)) {
+        setShowConversationMenu(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [showConversationMenu]);
+
   const currentTier = MODEL_TIERS.find((t) => t.variants.some((v) => v.model === params.model)) || MODEL_TIERS[1];
   const currentVariant = currentTier.variants.find((v) => v.model === params.model) || currentTier.variants[1];
   const availableRatios = currentTier.extendedRatios ? [...STANDARD_RATIOS, ...EXTENDED_RATIOS] : STANDARD_RATIOS;
   const maxImages = currentTier.maxInputImages;
+  const filteredConversations = conversations
+    .filter((conversation) => {
+      const query = conversationSearch.trim().toLowerCase();
+      if (!query) return true;
+      const haystack = [
+        conversation.title,
+        ...(conversation.messages || []).slice(-4).map((message) => message.text || ""),
+      ].join(" ").toLowerCase();
+      return haystack.includes(query);
+    })
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
+
+  const formatConversationTime = useCallback((timestamp) => {
+    if (!timestamp) return "";
+    return new Date(timestamp).toLocaleString("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }, []);
 
   const addImages = useCallback(async (files) => {
     const remaining = maxImages - (refImages?.length || 0);
@@ -370,6 +440,123 @@ export default function ChatPanel({
           )}
         </div>
 
+        <div className="px-3 pt-3 pb-2 flex-shrink-0">
+          <div className="relative" ref={conversationMenuRef}>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowConversationMenu((prev) => !prev)}
+                className="flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-primary hover:bg-bg-hover transition-all text-left"
+              >
+                <div className="w-8 h-8 rounded-xl bg-accent/15 border border-accent/20 text-accent flex items-center justify-center flex-shrink-0">
+                  <MessageSquareText size={14} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] text-text-tertiary">当前对话</p>
+                  <p className="text-sm text-text-primary truncate">
+                    {activeConversation?.title || "新建对话"}
+                  </p>
+                </div>
+                <ChevronDown size={15} className={`text-text-tertiary transition-transform ${showConversationMenu ? "rotate-180" : ""}`} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowConversationMenu(false);
+                  onNewConversation?.();
+                }}
+                className="h-10 px-3 rounded-xl bg-bg-tertiary border border-border-primary text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all flex items-center gap-1.5"
+                title="新建对话"
+              >
+                <Plus size={15} />
+                <span className="text-xs font-medium">新建对话</span>
+              </button>
+            </div>
+
+            {showConversationMenu && (
+              <div className="absolute left-0 right-0 top-[calc(100%+8px)] rounded-2xl border border-border-primary bg-bg-secondary/95 backdrop-blur-xl shadow-2xl p-3 space-y-3 z-30 animate-fade-in">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-text-primary">历史对话</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowConversationMenu(false);
+                      onNewConversation?.();
+                    }}
+                    className="h-9 px-3 rounded-xl bg-accent text-white hover:bg-accent-hover transition-all flex items-center gap-1.5 text-xs font-medium"
+                  >
+                    <Plus size={14} />
+                    新建对话
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-primary">
+                  <Search size={14} className="text-text-tertiary flex-shrink-0" />
+                  <input
+                    type="text"
+                    value={conversationSearch}
+                    onChange={(e) => setConversationSearch(e.target.value)}
+                    placeholder="请输入搜索关键词"
+                    className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-tertiary outline-none"
+                  />
+                </div>
+
+                <div className="max-h-64 overflow-y-auto space-y-1.5 scrollbar-thin pr-1">
+                  {filteredConversations.length === 0 && (
+                    <div className="px-3 py-6 text-center text-sm text-text-tertiary">
+                      没有匹配的历史对话
+                    </div>
+                  )}
+                  {filteredConversations.map((conversation) => {
+                    const isActive = conversation.id === activeConversationId;
+                    const lastMessage = [...(conversation.messages || [])].reverse().find((message) => message.text?.trim());
+                    return (
+                      <button
+                        key={conversation.id}
+                        type="button"
+                        onClick={() => {
+                          setShowConversationMenu(false);
+                          onSelectConversation?.(conversation.id);
+                        }}
+                        className={`w-full text-left px-3 py-2.5 rounded-xl transition-all border ${
+                          isActive
+                            ? "bg-accent/10 border-accent/30"
+                            : "bg-bg-tertiary border-border-primary hover:bg-bg-hover"
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <p className={`text-sm font-medium truncate flex-1 ${isActive ? "text-text-primary" : "text-text-secondary"}`}>
+                            {conversation.title || "新建对话"}
+                          </p>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            <span className="text-[10px] text-text-tertiary">
+                              {formatConversationTime(conversation.updatedAt)}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onDeleteConversation?.(conversation.id);
+                              }}
+                              className="w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-red-400 hover:bg-red-500/10 transition-all"
+                              title="删除对话"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-text-tertiary mt-1 line-clamp-2">
+                          {lastMessage?.text || "暂无消息"}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
           {messages.length === 0 && (
@@ -406,6 +593,7 @@ export default function ChatPanel({
               onImageClick={onImageClick}
               onPreview={setPreviewSrc}
               onPauseGenerate={msg.status === "generating" ? onPauseGenerate : null}
+              onDelete={onDeleteMessage}
             />
           ))}
           <div ref={messagesEndRef} />

@@ -17,7 +17,28 @@ function errStr(e) {
 }
 
 const REQUEST_TIMEOUT_MS = 55000;
-const STORAGE_VERSION = "8";
+const STORAGE_VERSION = "9";
+const DEFAULT_CONVERSATION_TITLE = "新建对话";
+
+function createConversation(overrides = {}) {
+  const now = Date.now();
+  return {
+    id: overrides.id || `conv-${now}-${Math.random().toString(36).slice(2, 8)}`,
+    title: overrides.title || DEFAULT_CONVERSATION_TITLE,
+    messages: overrides.messages || [],
+    createdAt: overrides.createdAt || now,
+    updatedAt: overrides.updatedAt || now,
+  };
+}
+
+function deriveConversationTitle(currentTitle, messages) {
+  const firstUserMessage = messages.find((msg) => msg.role === "user" && msg.text?.trim());
+  if (firstUserMessage?.text) {
+    const normalized = firstUserMessage.text.replace(/\s+/g, " ").trim();
+    return normalized.length > 20 ? `${normalized.slice(0, 20)}...` : normalized;
+  }
+  return currentTitle || DEFAULT_CONVERSATION_TITLE;
+}
 
 async function makeMessagePreviewImage(img) {
   if (typeof img !== "string") {
@@ -61,6 +82,13 @@ function sanitizeMessagesForStorage(messages) {
       }).filter(Boolean),
     };
   });
+}
+
+function sanitizeConversationsForStorage(conversations) {
+  return conversations.slice(0, 50).map((conversation) => ({
+    ...conversation,
+    messages: sanitizeMessagesForStorage(conversation.messages || []),
+  }));
 }
 
 async function parseApiResponse(res) {
@@ -137,6 +165,7 @@ const MODEL_LABELS = {
 function HomeInner() {
   const toast = useToast();
   const { theme, toggleTheme } = useTheme("dark");
+  const initialConversationRef = useRef(createConversation());
   const [activeTool, setActiveTool] = useState("select");
   const [zoom, setZoom] = useState(100);
   const [prompt, setPrompt] = useState("");
@@ -147,7 +176,8 @@ function HomeInner() {
     num: 1,
   });
   const [showParams, setShowParams] = useState(false);
-  const [messages, setMessages] = useState([]);
+  const [conversations, setConversations] = useState([initialConversationRef.current]);
+  const [activeConversationId, setActiveConversationId] = useState(initialConversationRef.current.id);
   const canvasHistory = useHistory([]);
   const canvasImages = canvasHistory.state;
   const [selectedImage, setSelectedImage] = useState(null);
@@ -158,35 +188,75 @@ function HomeInner() {
   const canvasRef = useRef(null);
   const generationAbortRef = useRef(null);
   const activeGenerationRef = useRef(null);
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId) || conversations[0];
+  const messages = activeConversation?.messages || [];
+  const historyMessages = conversations.flatMap((conversation) =>
+    (conversation.messages || []).map((message) => ({
+      ...message,
+      _conversationId: conversation.id,
+    }))
+  );
 
   // Load from localStorage
   useEffect(() => {
     try {
       const ver = localStorage.getItem("lovart-version");
       if (ver !== STORAGE_VERSION) {
-        localStorage.removeItem("lovart-messages");
+        const legacyMessages = localStorage.getItem("lovart-messages");
+        localStorage.removeItem("lovart-conversations");
+        localStorage.removeItem("lovart-active-conversation");
         localStorage.removeItem("lovart-canvas-images");
         localStorage.setItem("lovart-version", STORAGE_VERSION);
+        if (legacyMessages) {
+          const parsedMessages = JSON.parse(legacyMessages);
+          const migratedConversation = createConversation({
+            title: deriveConversationTitle(DEFAULT_CONVERSATION_TITLE, parsedMessages),
+            messages: parsedMessages,
+          });
+          setConversations([migratedConversation]);
+          setActiveConversationId(migratedConversation.id);
+          localStorage.removeItem("lovart-messages");
+        }
         return;
       }
-      const saved = localStorage.getItem("lovart-messages");
+      const saved = localStorage.getItem("lovart-conversations");
+      const savedActiveConversationId = localStorage.getItem("lovart-active-conversation");
       const savedImages = localStorage.getItem("lovart-canvas-images");
-      if (saved) setMessages(JSON.parse(saved));
+      if (saved) {
+        const parsedConversations = JSON.parse(saved);
+        if (Array.isArray(parsedConversations) && parsedConversations.length > 0) {
+          setConversations(parsedConversations);
+          setActiveConversationId(
+            parsedConversations.some((conversation) => conversation.id === savedActiveConversationId)
+              ? savedActiveConversationId
+              : parsedConversations[0].id
+          );
+        }
+      }
       if (savedImages) canvasHistory.setState(JSON.parse(savedImages));
     } catch {
-      localStorage.removeItem("lovart-messages");
+      localStorage.removeItem("lovart-conversations");
+      localStorage.removeItem("lovart-active-conversation");
       localStorage.removeItem("lovart-canvas-images");
     }
   }, []);
 
-  // Persist messages
+  useEffect(() => {
+    if (!activeConversationId && conversations[0]?.id) {
+      setActiveConversationId(conversations[0].id);
+    }
+  }, [activeConversationId, conversations]);
+
+  // Persist conversations
   useEffect(() => {
     try {
-      localStorage.setItem("lovart-messages", JSON.stringify(sanitizeMessagesForStorage(messages)));
+      localStorage.setItem("lovart-conversations", JSON.stringify(sanitizeConversationsForStorage(conversations)));
+      localStorage.setItem("lovart-active-conversation", activeConversationId || "");
     } catch {
-      localStorage.removeItem("lovart-messages");
+      localStorage.removeItem("lovart-conversations");
+      localStorage.removeItem("lovart-active-conversation");
     }
-  }, [messages]);
+  }, [activeConversationId, conversations]);
 
   // Persist canvas images
   useEffect(() => {
@@ -197,15 +267,43 @@ function HomeInner() {
     }
   }, [canvasImages]);
 
-  const updateMessage = useCallback((id, updates) => {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...updates } : m)));
+  const updateConversationMessages = useCallback((conversationId, updater) => {
+    setConversations((prev) => prev.map((conversation) => {
+      if (conversation.id !== conversationId) {
+        return conversation;
+      }
+      const nextMessages = typeof updater === "function"
+        ? updater(conversation.messages || [])
+        : updater;
+      return {
+        ...conversation,
+        messages: nextMessages,
+        title: deriveConversationTitle(conversation.title, nextMessages),
+        updatedAt: Date.now(),
+      };
+    }));
+  }, []);
+
+  const updateMessage = useCallback((conversationId, messageId, updates) => {
+    updateConversationMessages(conversationId, (prev) =>
+      prev.map((message) => (message.id === messageId ? { ...message, ...updates } : message))
+    );
+  }, [updateConversationMessages]);
+
+  const resetComposer = useCallback(() => {
+    setPrompt("");
+    setRefImages([]);
+    setShowParams(false);
+    setSelectedImage(null);
+    canvasSelectionRef.current = null;
   }, []);
 
   const handleGenerate = useCallback(async () => {
     const text = prompt.trim();
-    if (!text || isGenerating) return;
+    if (!text || isGenerating || !activeConversationId) return;
 
     const ts = Date.now();
+    const conversationId = activeConversationId;
     const userMsgId = "user-" + ts;
     const aiMsgId = "ai-" + ts;
     const modelLabel = MODEL_LABELS[params.model] || params.model;
@@ -226,7 +324,7 @@ function HomeInner() {
       status: "generating", urls: [], error: null,
     };
 
-    setMessages((prev) => [...prev, userMsg, aiMsg]);
+    updateConversationMessages(conversationId, (prev) => [...prev, userMsg, aiMsg]);
     setIsGenerating(true);
     setPrompt("");
 
@@ -234,6 +332,7 @@ function HomeInner() {
       const requestController = new AbortController();
       generationAbortRef.current = requestController;
       activeGenerationRef.current = {
+        conversationId,
         aiMsgId,
         controller: requestController,
         cancelled: false,
@@ -290,6 +389,7 @@ function HomeInner() {
 
       const data = await parseApiResponse(res);
       if (
+        activeGenerationRef.current?.conversationId !== conversationId ||
         activeGenerationRef.current?.aiMsgId !== aiMsgId ||
         activeGenerationRef.current?.cancelled
       ) {
@@ -297,7 +397,7 @@ function HomeInner() {
       }
 
       if (!res.ok || data.error) {
-        updateMessage(aiMsgId, {
+        updateMessage(conversationId, aiMsgId, {
           status: "failed",
           error: errStr(data.error || `请求失败（${res.status}）`),
         });
@@ -306,48 +406,52 @@ function HomeInner() {
 
       const urls = data.data?.urls || [];
       if (urls.length > 0) {
-        updateMessage(aiMsgId, { status: "completed", urls });
+        updateMessage(conversationId, aiMsgId, { status: "completed", urls });
         const newCanvasImages = urls.map((url, i) => ({
           id: aiMsgId + "-" + i, image_url: url, prompt: text,
         }));
         canvasHistory.push((prev) => [...prev, ...newCanvasImages]);
         toast(`生成完成，${urls.length} 张图片已添加到画布`, "success");
       } else {
-        updateMessage(aiMsgId, { status: "failed", error: "未返回图片" });
+        updateMessage(conversationId, aiMsgId, { status: "failed", error: "未返回图片" });
       }
 
       setRefImages([]);
     } catch (err) {
       const isTimeout = err?.name === "AbortError";
       if (
+        activeGenerationRef.current?.conversationId === conversationId &&
         activeGenerationRef.current?.aiMsgId === aiMsgId &&
         activeGenerationRef.current?.cancelled
       ) {
         return;
       }
-      updateMessage(aiMsgId, {
+      updateMessage(conversationId, aiMsgId, {
         status: "failed",
         error: isTimeout
           ? "请求超时。当前部署平台可能已超时，请优先尝试 512px / 1K 模型，或稍后重试。"
           : "请求失败: " + errStr(err),
       });
     } finally {
-      if (activeGenerationRef.current?.aiMsgId === aiMsgId) {
+      if (
+        activeGenerationRef.current?.conversationId === conversationId &&
+        activeGenerationRef.current?.aiMsgId === aiMsgId
+      ) {
         activeGenerationRef.current = null;
       }
       generationAbortRef.current = null;
       setIsGenerating(false);
     }
-  }, [prompt, params, refImages, isGenerating, updateMessage, canvasHistory, toast]);
+  }, [prompt, isGenerating, activeConversationId, params, refImages, updateMessage, updateConversationMessages, canvasHistory, toast]);
 
   const handlePauseGenerate = useCallback(() => {
     const currentTask = activeGenerationRef.current;
     if (!currentTask) return;
 
-    const { aiMsgId, controller } = currentTask;
+    const { conversationId, aiMsgId, controller } = currentTask;
     currentTask.cancelled = true;
 
-    updateMessage(aiMsgId, {
+    updateMessage(conversationId, aiMsgId, {
       status: "paused",
       error: "已手动暂停",
     });
@@ -437,16 +541,83 @@ function HomeInner() {
 
   // History panel: click an item → fill prompt with that text
   const handleSelectHistory = useCallback((msg) => {
+    if (msg._conversationId) {
+      setActiveConversationId(msg._conversationId);
+    }
     if (msg.text) setPrompt(msg.text);
     if (msg.params) setParams(msg.params);
     toast("已载入历史提示词", "info", 1200);
   }, [toast]);
 
   const handleClearHistory = useCallback(() => {
-    setMessages([]);
-    localStorage.removeItem("lovart-messages");
+    setConversations((prev) => prev.map((conversation) => ({
+      ...conversation,
+      title: DEFAULT_CONVERSATION_TITLE,
+      messages: [],
+      updatedAt: Date.now(),
+    })));
+    localStorage.removeItem("lovart-conversations");
+    localStorage.removeItem("lovart-active-conversation");
     toast("历史记录已清空", "info", 1500);
   }, [toast]);
+
+  const handleNewConversation = useCallback(() => {
+    if (isGenerating) {
+      toast("生成过程中暂时不能切换对话", "info", 1500);
+      return;
+    }
+    const nextConversation = createConversation();
+    setConversations((prev) => [nextConversation, ...prev]);
+    setActiveConversationId(nextConversation.id);
+    resetComposer();
+  }, [isGenerating, resetComposer, toast]);
+
+  const handleSelectConversation = useCallback((conversationId) => {
+    if (isGenerating) {
+      toast("生成过程中暂时不能切换对话", "info", 1500);
+      return;
+    }
+    setActiveConversationId(conversationId);
+    resetComposer();
+  }, [isGenerating, resetComposer, toast]);
+
+  const handleDeleteConversation = useCallback((conversationId) => {
+    if (isGenerating) {
+      toast("生成过程中暂时不能删除对话", "info", 1500);
+      return;
+    }
+
+    setConversations((prev) => {
+      if (prev.length <= 1) {
+        const nextConversation = createConversation();
+        setActiveConversationId(nextConversation.id);
+        resetComposer();
+        return [nextConversation];
+      }
+
+      const remaining = prev.filter((conversation) => conversation.id !== conversationId);
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(remaining[0]?.id || "");
+        resetComposer();
+      }
+      return remaining;
+    });
+
+    toast("对话已删除", "info", 1200);
+  }, [activeConversationId, isGenerating, resetComposer, toast]);
+
+  const handleDeleteMessage = useCallback((messageId) => {
+    if (isGenerating) {
+      toast("生成过程中暂时不能删除记录", "info", 1500);
+      return;
+    }
+    if (!activeConversationId) {
+      return;
+    }
+
+    updateConversationMessages(activeConversationId, (prev) => prev.filter((message) => message.id !== messageId));
+    toast("记录已删除", "info", 1200);
+  }, [activeConversationId, isGenerating, toast, updateConversationMessages]);
 
   const historyWidth = historyCollapsed ? 40 : 220;
 
@@ -464,7 +635,7 @@ function HomeInner() {
         <span className="text-lg font-semibold text-text-primary tracking-tight">Easy AI</span>
       </Link>
       <HistoryPanel
-        messages={messages}
+        messages={historyMessages}
         onSelectHistory={handleSelectHistory}
         onClearHistory={handleClearHistory}
         collapsed={historyCollapsed}
@@ -487,6 +658,12 @@ function HomeInner() {
         onZoomChange={handleZoomChange}
       />
       <ChatPanel
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        onSelectConversation={handleSelectConversation}
+        onNewConversation={handleNewConversation}
+        onDeleteConversation={handleDeleteConversation}
+        onDeleteMessage={handleDeleteMessage}
         messages={messages}
         prompt={prompt}
         onPromptChange={setPrompt}
