@@ -181,8 +181,26 @@ function HomeInner() {
         controller: requestController,
         cancelled: false,
       };
-      const compressed = await Promise.all(
-        refImages.map((img) => compressImage(img, 1024, 0.8))
+      const preparedImages = await Promise.all(
+        refImages.map((img) => {
+          if (typeof img !== "string") {
+            return img;
+          }
+
+          // Remote URLs should be passed through directly. Re-encoding them in
+          // the browser can fail because of CORS and also wastes payload budget.
+          if (/^https?:\/\//i.test(img)) {
+            return img;
+          }
+
+          // Uploaded/local data URLs are compressed more aggressively so the
+          // Netlify function is less likely to hit an inactivity timeout.
+          if (/^data:image\//i.test(img)) {
+            return compressImage(img, 768, 0.68);
+          }
+
+          return img;
+        })
       );
 
       const imageSize = params.image_size === "auto"
@@ -191,7 +209,7 @@ function HomeInner() {
 
       let res;
       if (hasImages) {
-        const image = compressed.length === 1 ? compressed[0] : compressed;
+        const image = preparedImages.length === 1 ? preparedImages[0] : preparedImages;
         res = await fetchWithTimeout("/api/edit", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
