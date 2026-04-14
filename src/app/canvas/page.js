@@ -15,6 +15,50 @@ function errStr(e) {
   return e.message || e.error || JSON.stringify(e);
 }
 
+const REQUEST_TIMEOUT_MS = 55000;
+
+async function parseApiResponse(res) {
+  const rawText = await res.text();
+
+  if (!rawText) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    if (/inactivity timeout/i.test(rawText)) {
+      return {
+        error: "生成超时。Netlify 免费函数等待时间有限，请优先尝试 512px 或 1K 模型后重试。",
+      };
+    }
+
+    if (/^\s*</.test(rawText)) {
+      return {
+        error: "服务暂时返回了错误页，通常是部署平台超时或上游接口异常，请稍后重试。",
+      };
+    }
+
+    return {
+      error: `接口返回了非 JSON 内容：${rawText.slice(0, 120)}`,
+    };
+  }
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 const MODEL_LABELS = {
   "gemini-2.5-flash-image": "Nano Banana 1K",
   "gemini-2.5-flash-image-hd": "Nano Banana 1K HD",
@@ -34,7 +78,7 @@ function HomeInner() {
   const [prompt, setPrompt] = useState("");
   const [refImages, setRefImages] = useState([]);
   const [params, setParams] = useState({
-    model: "gemini-3.1-flash-image-preview",
+    model: "gemini-3.1-flash-image-preview-512",
     image_size: "1:1",
     num: 1,
   });
@@ -140,7 +184,7 @@ function HomeInner() {
       let res;
       if (hasImages) {
         const image = compressed.length === 1 ? compressed[0] : compressed;
-        res = await fetch("/api/edit", {
+        res = await fetchWithTimeout("/api/edit", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -149,7 +193,7 @@ function HomeInner() {
           }),
         });
       } else {
-        res = await fetch("/api/generate", {
+        res = await fetchWithTimeout("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -159,10 +203,12 @@ function HomeInner() {
         });
       }
 
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok || data.error) {
-        updateMessage(aiMsgId, { status: "failed", error: errStr(data.error) });
-        setIsGenerating(false);
+        updateMessage(aiMsgId, {
+          status: "failed",
+          error: errStr(data.error || `请求失败（${res.status}）`),
+        });
         return;
       }
 
@@ -180,7 +226,13 @@ function HomeInner() {
 
       setRefImages([]);
     } catch (err) {
-      updateMessage(aiMsgId, { status: "failed", error: "请求失败: " + errStr(err) });
+      const isTimeout = err?.name === "AbortError";
+      updateMessage(aiMsgId, {
+        status: "failed",
+        error: isTimeout
+          ? "请求超时。当前部署平台可能已超时，请优先尝试 512px / 1K 模型，或稍后重试。"
+          : "请求失败: " + errStr(err),
+      });
     } finally {
       setIsGenerating(false);
     }
