@@ -6,7 +6,7 @@ import {
 } from "react";
 import {
   Maximize2, Download, Trash2, Copy,
-  MessageSquare, Lock, Unlock, FileDown,
+  MessageSquare, Lock, Unlock, FileDown, Image as ImageIcon,
 } from "lucide-react";
 import { useToast } from "@/components/Toast";
 import Toolbar from "@/components/Toolbar";
@@ -90,6 +90,7 @@ export default function Canvas({
   actionRef.current = action;
 
   const positionsRef = useRef({});
+  const imageMetaRef = useRef({});
   images.forEach((img, i) => {
     if (!positionsRef.current[img.id]) {
       const col = i % 4;
@@ -346,10 +347,7 @@ export default function Canvas({
       ref={containerRef}
       className={`flex-1 relative overflow-hidden select-none ${cursor}`}
       style={{
-        background: "#0a0a0a",
-        backgroundImage: "radial-gradient(circle, #1e1e1e 1px, transparent 1px)",
-        backgroundSize: `${20 * scale}px ${20 * scale}px`,
-        backgroundPosition: `${camera.x}px ${camera.y}px`,
+        background: "var(--bg-primary)",
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -398,6 +396,10 @@ export default function Canvas({
           if (!pos) return null;
           const isSelected = selectedImage?.id === img.id;
           const isLocked = lockedRef.current.has(img.id);
+          const meta = imageMetaRef.current[img.id];
+          const displayHeight = meta
+            ? Math.round((pos.w * meta.height) / meta.width)
+            : Math.round(pos.w);
 
           return (
             <div
@@ -406,14 +408,24 @@ export default function Canvas({
               className={`absolute group ${isLocked ? "opacity-90" : ""}`}
               style={{ left: pos.x, top: pos.y, width: pos.w }}
             >
-              <div className={`rounded-xl overflow-hidden border-2 transition-colors shadow-2xl shadow-black/50 ${
-                isSelected ? "border-white" : "border-transparent hover:border-border-secondary"
+              <div className={`rounded-xl overflow-hidden border-2 transition-colors ${
+                isSelected ? "border-accent" : "border-transparent hover:border-border-secondary"
               }`}>
                 <img
                   src={img.image_url}
                   alt={img.prompt}
                   className="w-full block pointer-events-none"
                   draggable={false}
+                  onLoad={(e) => {
+                    const { naturalWidth, naturalHeight } = e.currentTarget;
+                    if (naturalWidth && naturalHeight) {
+                      imageMetaRef.current[img.id] = {
+                        width: naturalWidth,
+                        height: naturalHeight,
+                      };
+                      forceRender();
+                    }
+                  }}
                 />
 
                 <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -441,13 +453,31 @@ export default function Canvas({
                 )}
               </div>
 
+              {isSelected && (
+                <>
+                  <div className="absolute -top-6 left-0 right-0 flex items-center justify-between text-[10px] text-accent pointer-events-none">
+                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 rounded-md bg-bg-primary/90 border border-accent/40">
+                      <ImageIcon size={10} />
+                      <span>{img.prompt || "Image"}</span>
+                    </div>
+                    <div className="px-1.5 py-0.5 rounded-md bg-bg-primary/90 border border-accent/40">
+                      {Math.round(pos.w)} × {displayHeight}
+                    </div>
+                  </div>
+
+                  <div className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px]" />
+                  <div className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px]" />
+                  <div className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px]" />
+                </>
+              )}
+
               <p className="text-[10px] text-text-tertiary mt-1 truncate px-0.5 pointer-events-none">
                 {img.prompt}
               </p>
 
               {isSelected && !isLocked && (
                 <div
-                  className="absolute -bottom-1 -right-1 w-4 h-4 bg-white rounded-sm cursor-nwse-resize border-2 border-bg-primary"
+                  className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary rounded-[2px] cursor-nwse-resize border-2 border-accent"
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     const startX = e.clientX;

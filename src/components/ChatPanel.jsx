@@ -5,6 +5,8 @@ import {
   Send,
   ImagePlus,
   X,
+  Sun,
+  Moon,
   Settings2,
   ChevronDown,
   Loader2,
@@ -12,10 +14,10 @@ import {
   RotateCw,
   Download,
   Sparkles,
+  PauseCircle,
   Zap,
   Crown,
   Rocket,
-  GripVertical,
 } from "lucide-react";
 
 const MODEL_TIERS = [
@@ -123,7 +125,7 @@ function ImageLightbox({ src, onClose }) {
   );
 }
 
-function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview }) {
+function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, onPauseGenerate }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
@@ -176,6 +178,32 @@ function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview }
               background: "linear-gradient(90deg, #1a1a1a 25%, #262626 50%, #1a1a1a 75%)",
               backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite",
             }} />
+            {onPauseGenerate && (
+              <button
+                onClick={onPauseGenerate}
+                className="mt-3 px-3 py-1.5 rounded-lg bg-bg-hover text-xs text-text-secondary hover:text-text-primary border border-border-primary transition-all flex items-center gap-1.5"
+              >
+                <PauseCircle size={12} /> 暂停生成
+              </button>
+            )}
+          </div>
+        )}
+
+        {message.status === "paused" && (
+          <div className="bg-bg-tertiary border border-warning/20 rounded-2xl rounded-tl-md px-4 py-3">
+            <div className="flex items-center gap-2 text-warning mb-1">
+              <PauseCircle size={16} />
+              <span className="text-sm font-medium">已暂停</span>
+            </div>
+            <p className="text-xs text-text-tertiary mb-3">
+              当前生成已手动暂停，你可以修改提示词或参数后重新生成。
+            </p>
+            <button
+              onClick={() => onRetry?.(message)}
+              className="px-3 py-1.5 rounded-lg bg-bg-hover text-xs text-text-secondary hover:text-text-primary border border-border-primary transition-all flex items-center gap-1.5"
+            >
+              <RotateCw size={12} /> 重新生成
+            </button>
           </div>
         )}
 
@@ -226,6 +254,8 @@ export default function ChatPanel({
   params, onParamsChange, showParams, onToggleParams,
   refImages, onRefImagesChange,
   onRetry, onDownload, onImageClick,
+  onPauseGenerate,
+  theme, onToggleTheme,
   width, onWidthChange,
 }) {
   const messagesEndRef = useRef(null);
@@ -312,13 +342,22 @@ export default function ChatPanel({
       {/* Panel content */}
       <div className="flex-1 bg-bg-secondary border-l border-border-primary flex flex-col h-full min-w-0">
         {/* Header */}
-        <div className="h-12 px-4 flex items-center border-b border-border-primary flex-shrink-0">
+        <div className="h-12 px-4 flex items-center justify-between border-b border-border-primary flex-shrink-0">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center">
               <Sparkles size={12} className="text-white" />
             </div>
             <span className="text-sm font-medium text-text-primary">Agent</span>
           </div>
+          {onToggleTheme && (
+            <button
+              onClick={onToggleTheme}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
+              title={theme === "dark" ? "切换到浅色" : "切换到深色"}
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          )}
         </div>
 
         {/* Messages */}
@@ -349,7 +388,15 @@ export default function ChatPanel({
             </div>
           )}
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} onRetry={onRetry} onDownload={onDownload} onImageClick={onImageClick} onPreview={setPreviewSrc} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onRetry={onRetry}
+              onDownload={onDownload}
+              onImageClick={onImageClick}
+              onPreview={setPreviewSrc}
+              onPauseGenerate={msg.status === "generating" ? onPauseGenerate : null}
+            />
           ))}
           <div ref={messagesEndRef} />
         </div>
@@ -490,10 +537,20 @@ export default function ChatPanel({
               style={{ fieldSizing: "content" }}
             />
 
-            <button onClick={onSubmit} disabled={isGenerating || !prompt.trim()}
-              className={`flex-shrink-0 p-2 rounded-lg transition-all ${isGenerating || !prompt.trim() ? "text-text-tertiary cursor-not-allowed" : "bg-accent hover:bg-accent-hover text-white"}`}>
-              <Send size={16} />
-            </button>
+            {isGenerating ? (
+              <button
+                onClick={onPauseGenerate}
+                className="flex-shrink-0 p-2 rounded-lg transition-all bg-warning/15 text-warning hover:bg-warning/25"
+                title="暂停生成"
+              >
+                <PauseCircle size={16} />
+              </button>
+            ) : (
+              <button onClick={onSubmit} disabled={!prompt.trim()}
+                className={`flex-shrink-0 p-2 rounded-lg transition-all ${!prompt.trim() ? "text-text-tertiary cursor-not-allowed" : "bg-accent hover:bg-accent-hover text-white"}`}>
+                <Send size={16} />
+              </button>
+            )}
           </div>
         </div>
       </div>

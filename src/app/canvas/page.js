@@ -1,13 +1,14 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import TopBar from "@/components/TopBar";
+import Link from "next/link";
 import Canvas from "@/components/Canvas";
 import ChatPanel from "@/components/ChatPanel";
 import HistoryPanel from "@/components/HistoryPanel";
 import { ToastProvider, useToast } from "@/components/Toast";
 import { compressImage } from "@/lib/imageUtils";
 import { useHistory } from "@/lib/useHistory";
+import { useTheme } from "@/lib/useTheme";
 
 function errStr(e) {
   if (!e) return "未知错误";
@@ -46,16 +47,33 @@ async function parseApiResponse(res) {
 }
 
 async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutController = new AbortController();
+  const timer = window.setTimeout(() => timeoutController.abort(), timeoutMs);
+  const externalSignal = options?.signal;
+
+  const cleanup = () => {
+    window.clearTimeout(timer);
+  };
+
+  const handleExternalAbort = () => timeoutController.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      timeoutController.abort();
+    } else {
+      externalSignal.addEventListener("abort", handleExternalAbort, { once: true });
+    }
+  }
 
   try {
     return await fetch(url, {
       ...options,
-      signal: controller.signal,
+      signal: timeoutController.signal,
     });
   } finally {
-    window.clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", handleExternalAbort);
+    }
+    cleanup();
   }
 }
 
@@ -73,6 +91,7 @@ const MODEL_LABELS = {
 
 function HomeInner() {
   const toast = useToast();
+  const { theme, toggleTheme } = useTheme("dark");
   const [activeTool, setActiveTool] = useState("select");
   const [zoom, setZoom] = useState(100);
   const [prompt, setPrompt] = useState("");
@@ -89,7 +108,11 @@ function HomeInner() {
   const [selectedImage, setSelectedImage] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [panelWidth, setPanelWidth] = useState(340);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [historySearch, setHistorySearch] = useState("");
   const canvasRef = useRef(null);
+  const generationAbortRef = useRef(null);
+  const activeGenerationRef = useRef(null);
 
   // Load from localStorage
   useEffect(() => {
@@ -121,28 +144,6 @@ function HomeInner() {
     localStorage.setItem("lovart-canvas-images", JSON.stringify(canvasImages.slice(0, 100)));
   }, [canvasImages]);
 
-  // Undo / Redo keyboard shortcuts
-  useEffect(() => {
-    const handler = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
-        if (!["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
-          e.preventDefault();
-          canvasHistory.undo();
-          toast("撤销成功", "info", 1200);
-        }
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) {
-        if (!["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
-          e.preventDefault();
-          canvasHistory.redo();
-          toast("重做成功", "info", 1200);
-        }
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [canvasHistory, toast]);
-
   const updateMessage = useCallback((id, updates) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...updates } : m)));
   }, []);
@@ -173,6 +174,13 @@ function HomeInner() {
     setPrompt("");
 
     try {
+      const requestController = new AbortController();
+      generationAbortRef.current = requestController;
+      activeGenerationRef.current = {
+        aiMsgId,
+        controller: requestController,
+        cancelled: false,
+      };
       const compressed = await Promise.all(
         refImages.map((img) => compressImage(img, 1024, 0.8))
       );
@@ -187,6 +195,7 @@ function HomeInner() {
         res = await fetchWithTimeout("/api/edit", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: requestController.signal,
           body: JSON.stringify({
             prompt: text, image,
             model: params.model, image_size: imageSize, num: params.num,
@@ -196,6 +205,7 @@ function HomeInner() {
         res = await fetchWithTimeout("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: requestController.signal,
           body: JSON.stringify({
             prompt: text,
             model: params.model, image_size: imageSize, num: params.num,
@@ -204,6 +214,13 @@ function HomeInner() {
       }
 
       const data = await parseApiResponse(res);
+      if (
+        activeGenerationRef.current?.aiMsgId !== aiMsgId ||
+        activeGenerationRef.current?.cancelled
+      ) {
+        return;
+      }
+
       if (!res.ok || data.error) {
         updateMessage(aiMsgId, {
           status: "failed",
@@ -227,6 +244,12 @@ function HomeInner() {
       setRefImages([]);
     } catch (err) {
       const isTimeout = err?.name === "AbortError";
+      if (
+        activeGenerationRef.current?.aiMsgId === aiMsgId &&
+        activeGenerationRef.current?.cancelled
+      ) {
+        return;
+      }
       updateMessage(aiMsgId, {
         status: "failed",
         error: isTimeout
@@ -234,9 +257,30 @@ function HomeInner() {
           : "请求失败: " + errStr(err),
       });
     } finally {
+      if (activeGenerationRef.current?.aiMsgId === aiMsgId) {
+        activeGenerationRef.current = null;
+      }
+      generationAbortRef.current = null;
       setIsGenerating(false);
     }
   }, [prompt, params, refImages, isGenerating, updateMessage, canvasHistory, toast]);
+
+  const handlePauseGenerate = useCallback(() => {
+    const currentTask = activeGenerationRef.current;
+    if (!currentTask) return;
+
+    const { aiMsgId, controller } = currentTask;
+    currentTask.cancelled = true;
+
+    updateMessage(aiMsgId, {
+      status: "paused",
+      error: "已手动暂停",
+    });
+    setIsGenerating(false);
+    generationAbortRef.current = null;
+    controller.abort();
+    toast("已暂停当前生成", "info", 1500);
+  }, [toast, updateMessage]);
 
   const handleDeleteImage = useCallback((id) => {
     canvasHistory.push((prev) => prev.filter((img) => img.id !== id));
@@ -316,24 +360,6 @@ function HomeInner() {
     setSelectedImage(msg);
   }, []);
 
-  const handleExport = useCallback(() => {
-    if (canvasRef.current?.exportCanvas) {
-      canvasRef.current.exportCanvas();
-    } else if (selectedImage?.image_url) {
-      handleDownload(selectedImage);
-    }
-  }, [selectedImage, handleDownload]);
-
-  const handleUndo = useCallback(() => {
-    canvasHistory.undo();
-    toast("撤销", "info", 1200);
-  }, [canvasHistory, toast]);
-
-  const handleRedo = useCallback(() => {
-    canvasHistory.redo();
-    toast("重做", "info", 1200);
-  }, [canvasHistory, toast]);
-
   // History panel: click an item → fill prompt with that text
   const handleSelectHistory = useCallback((msg) => {
     if (msg.text) setPrompt(msg.text);
@@ -347,55 +373,65 @@ function HomeInner() {
     toast("历史记录已清空", "info", 1500);
   }, [toast]);
 
+  const historyWidth = historyCollapsed ? 40 : 220;
+
   return (
-    <div className="h-screen flex flex-col">
-      <TopBar
-        projectName="Easy AI"
-        onExport={handleExport}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        canUndo={canvasHistory.canUndo}
-        canRedo={canvasHistory.canRedo}
+    <div className="h-screen flex overflow-hidden">
+      <Link
+        href="/"
+        className="absolute top-3 z-30 flex items-center gap-2.5 px-3 py-2 rounded-2xl bg-bg-secondary/90 backdrop-blur-xl border border-border-primary hover:bg-bg-hover transition-all"
+        style={{ left: historyWidth + 8 }}
+        title="返回首页"
+      >
+        <div className="w-8 h-8 rounded-xl bg-accent flex items-center justify-center">
+          <span className="text-white text-sm font-bold leading-none">E</span>
+        </div>
+        <span className="text-lg font-semibold text-text-primary tracking-tight">Easy AI</span>
+      </Link>
+      <HistoryPanel
+        messages={messages}
+        onSelectHistory={handleSelectHistory}
+        onClearHistory={handleClearHistory}
+        collapsed={historyCollapsed}
+        onCollapsedChange={setHistoryCollapsed}
+        search={historySearch}
+        onSearchChange={setHistorySearch}
       />
-      <div className="flex-1 flex overflow-hidden">
-        <HistoryPanel
-          messages={messages}
-          onSelectHistory={handleSelectHistory}
-          onClearHistory={handleClearHistory}
-        />
-        <Canvas
-          ref={canvasRef}
-          images={canvasImages}
-          selectedImage={selectedImage}
-          onSelectImage={handleSelectImage}
-          onDeleteImage={handleDeleteImage}
-          onUpdateImage={handleUpdateImage}
-          onSendToChat={handleSendToChat}
-          onDropImages={handleDropImages}
-          activeTool={activeTool}
-          onToolChange={setActiveTool}
-          zoom={zoom}
-          onZoomChange={handleZoomChange}
-        />
-        <ChatPanel
-          messages={messages}
-          prompt={prompt}
-          onPromptChange={setPrompt}
-          onSubmit={handleGenerate}
-          isGenerating={isGenerating}
-          params={params}
-          onParamsChange={setParams}
-          showParams={showParams}
-          onToggleParams={() => setShowParams(!showParams)}
-          refImages={refImages}
-          onRefImagesChange={setRefImages}
-          onRetry={handleRetry}
-          onDownload={handleDownload}
-          onImageClick={handleImageClick}
-          width={panelWidth}
-          onWidthChange={setPanelWidth}
-        />
-      </div>
+      <Canvas
+        ref={canvasRef}
+        images={canvasImages}
+        selectedImage={selectedImage}
+        onSelectImage={handleSelectImage}
+        onDeleteImage={handleDeleteImage}
+        onUpdateImage={handleUpdateImage}
+        onSendToChat={handleSendToChat}
+        onDropImages={handleDropImages}
+        activeTool={activeTool}
+        onToolChange={setActiveTool}
+        zoom={zoom}
+        onZoomChange={handleZoomChange}
+      />
+      <ChatPanel
+        messages={messages}
+        prompt={prompt}
+        onPromptChange={setPrompt}
+        onSubmit={handleGenerate}
+        isGenerating={isGenerating}
+        params={params}
+        onParamsChange={setParams}
+        showParams={showParams}
+        onToggleParams={() => setShowParams(!showParams)}
+        refImages={refImages}
+        onRefImagesChange={setRefImages}
+        onRetry={handleRetry}
+        onDownload={handleDownload}
+        onImageClick={handleImageClick}
+        onPauseGenerate={handlePauseGenerate}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        width={panelWidth}
+        onWidthChange={setPanelWidth}
+      />
     </div>
   );
 }

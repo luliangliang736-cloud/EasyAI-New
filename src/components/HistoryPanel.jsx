@@ -1,14 +1,18 @@
 "use client";
-
-import { useState, useRef, useCallback } from "react";
 import {
   Clock, Trash2, ChevronLeft, ChevronRight,
   ImageIcon, Search, X,
 } from "lucide-react";
 
-export default function HistoryPanel({ messages, onSelectHistory, onClearHistory }) {
-  const [collapsed, setCollapsed] = useState(false);
-  const [search, setSearch] = useState("");
+export default function HistoryPanel({
+  messages,
+  onSelectHistory,
+  onClearHistory,
+  collapsed,
+  onCollapsedChange,
+  search,
+  onSearchChange,
+}) {
 
   const completedMsgs = messages.filter(
     (m) => m.role === "assistant" && m.status === "completed" && m.urls?.length > 0
@@ -27,7 +31,7 @@ export default function HistoryPanel({ messages, onSelectHistory, onClearHistory
     return (
       <div className="w-10 bg-bg-secondary border-r border-border-primary flex flex-col items-center pt-3 flex-shrink-0">
         <button
-          onClick={() => setCollapsed(false)}
+          onClick={() => onCollapsedChange?.(false)}
           className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
           title="展开历史记录"
         >
@@ -57,7 +61,7 @@ export default function HistoryPanel({ messages, onSelectHistory, onClearHistory
           )}
         </div>
         <button
-          onClick={() => setCollapsed(true)}
+          onClick={() => onCollapsedChange?.(true)}
           className="w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
           title="收起"
         >
@@ -73,12 +77,12 @@ export default function HistoryPanel({ messages, onSelectHistory, onClearHistory
             <input
               type="text"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => onSearchChange?.(e.target.value)}
               placeholder="搜索历史..."
               className="flex-1 bg-transparent text-[11px] text-text-primary placeholder-text-tertiary outline-none"
             />
             {search && (
-              <button onClick={() => setSearch("")} className="text-text-tertiary hover:text-text-primary">
+              <button onClick={() => onSearchChange?.("")} className="text-text-tertiary hover:text-text-primary">
                 <X size={10} />
               </button>
             )}

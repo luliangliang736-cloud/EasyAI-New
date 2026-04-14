@@ -6,9 +6,20 @@ import {
   Redo2,
   Download,
   Share2,
+  Moon,
+  Sun,
 } from "lucide-react";
 
-export default function TopBar({ projectName, onExport, onUndo, onRedo, canUndo, canRedo }) {
+export default function TopBar({
+  projectName,
+  onExport,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  theme,
+  onToggleTheme,
+}) {
   return (
     <div className="h-12 bg-bg-secondary border-b border-border-primary flex items-center justify-between px-4 flex-shrink-0">
       <div className="flex items-center gap-3">
@@ -48,6 +59,13 @@ export default function TopBar({ projectName, onExport, onUndo, onRedo, canUndo,
       </div>
 
       <div className="flex items-center gap-1">
+        <button
+          onClick={onToggleTheme}
+          className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
+          title={theme === "dark" ? "切换到浅色" : "切换到深色"}
+        >
+          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+        </button>
         <button
           className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
           title="分享"
