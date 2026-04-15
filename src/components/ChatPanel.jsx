@@ -24,6 +24,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { compressImage } from "@/lib/imageUtils";
+import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
 const MODEL_TIERS = [
   {
@@ -201,7 +202,58 @@ function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, 
           </button>
         </div>
 
-        {message.status === "generating" && (
+        {message.status === "generating" && message.tasks?.length > 0 && (
+          <div className="bg-bg-tertiary border border-border-primary rounded-2xl rounded-tl-md px-4 py-4">
+            <p className="text-sm text-text-primary mb-2">
+              生成中{" "}
+              {message.tasks.filter((t) => t.status === "completed").length}/
+              {message.tasks.length}
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {message.tasks.map((t) => (
+                <div
+                  key={t.id}
+                  className="rounded-lg border border-border-primary overflow-hidden bg-bg-secondary/50 min-h-[100px] flex flex-col"
+                >
+                  {t.status === "pending" && (
+                    <div className="flex-1 flex items-center justify-center text-[10px] text-text-tertiary py-6">
+                      等待中
+                    </div>
+                  )}
+                  {t.status === "generating" && (
+                    <div className="flex-1 flex items-center justify-center py-6">
+                      <Loader2 size={20} className="text-accent animate-spin" />
+                    </div>
+                  )}
+                  {t.status === "completed" && t.url && (
+                    <button
+                      type="button"
+                      className="relative w-full cursor-pointer"
+                      onClick={() => onPreview?.(t.url)}
+                    >
+                      <img src={t.url} alt="" className="w-full object-cover" />
+                    </button>
+                  )}
+                  {t.status === "failed" && (
+                    <div className="p-2 text-[10px] text-error leading-snug">
+                      {t.error || "失败"}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            {onPauseGenerate && (
+              <button
+                onClick={onPauseGenerate}
+                className="mt-3 px-3 py-1.5 rounded-lg bg-bg-hover text-xs text-text-secondary hover:text-text-primary border border-border-primary transition-all flex items-center gap-1.5"
+              >
+                <PauseCircle size={12} /> 暂停全部
+              </button>
+            )}
+          </div>
+        )}
+
+        {message.status === "generating" && !message.tasks?.length && (
           <div className="bg-bg-tertiary border border-border-primary rounded-2xl rounded-tl-md px-4 py-4">
             <div className="flex items-center gap-3">
               <Loader2 size={18} className="text-accent animate-spin" />
@@ -749,14 +801,31 @@ export default function ChatPanel({
                 )}
               </div>
               <div>
-                <span className="block text-[11px] text-text-tertiary mb-1.5">生成数量</span>
-                <div className="flex gap-1.5">
-                  {[1, 2, 4, 9].map((n) => (
-                    <button key={n} onClick={() => onParamsChange({ ...params, num: n })}
-                      className={`flex-1 py-1.5 rounded-lg text-[11px] font-medium transition-all ${params.num === n ? "bg-accent text-white" : "bg-bg-tertiary text-text-secondary hover:bg-bg-hover border border-border-primary"}`}>
-                      {n}张
-                    </button>
-                  ))}
+                <span className="block text-[11px] text-text-tertiary mb-1.5">
+                  生成数量（1–{MAX_GEN_COUNT}）
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_GEN_COUNT}
+                    value={params.num ?? 1}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (raw === "") {
+                        onParamsChange({ ...params, num: 1 });
+                        return;
+                      }
+                      const n = parseInt(raw, 10);
+                      if (Number.isNaN(n)) return;
+                      onParamsChange({
+                        ...params,
+                        num: Math.min(MAX_GEN_COUNT, Math.max(1, n)),
+                      });
+                    }}
+                    className="w-20 px-2 py-1.5 rounded-lg text-[11px] font-medium bg-bg-tertiary border border-border-primary text-text-primary tabular-nums"
+                  />
+                  <span className="text-[10px] text-text-tertiary">张 · 提示词里写「3张」等会与该数取较大值</span>
                 </div>
               </div>
             </div>

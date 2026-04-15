@@ -9,11 +9,52 @@ import { ToastProvider, useToast } from "@/components/Toast";
 import { compressImage } from "@/lib/imageUtils";
 import { useHistory } from "@/lib/useHistory";
 import { useTheme } from "@/lib/useTheme";
+import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
 function errStr(e) {
   if (!e) return "未知错误";
   if (typeof e === "string") return e;
   return e.message || e.error || JSON.stringify(e);
+}
+
+function parseQuantityToken(tok) {
+  if (!tok) return 0;
+  const t = String(tok).trim();
+  if (/^\d{1,2}$/.test(t)) {
+    const n = parseInt(t, 10);
+    return n >= 1 && n <= 99 ? n : 0;
+  }
+  const map = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (t.length === 1 && map[t] !== undefined) return map[t];
+  if (t === "十") return 10;
+  const m10 = t.match(/^十([一二三四五六七八九])?$/);
+  if (m10) return 10 + (m10[1] ? map[m10[1]] : 0);
+  const m2 = t.match(/^([一二三四五六七八九])十([一二三四五六七八九])?$/);
+  if (m2) {
+    return map[m2[1]] * 10 + (m2[2] ? map[m2[2]] : 0);
+  }
+  return 0;
+}
+
+/** 从提示词推测要出几张（如「三套」「3张」），与侧栏张数取较大值，上限 MAX_GEN_COUNT */
+function inferLoopCountFromPrompt(text) {
+  if (!text || typeof text !== "string") return 0;
+  const compact = text.replace(/\s/g, "");
+  let best = 0;
+  const cnRe = /([0-9]{1,2}|[一二三四五六七八九十两]+)(套|张|款|组|幅|种|版|次|变)/g;
+  let m;
+  while ((m = cnRe.exec(compact)) !== null) {
+    const n = parseQuantityToken(m[1]);
+    const capped = Math.min(n, MAX_GEN_COUNT);
+    if (capped >= 1) best = Math.max(best, capped);
+  }
+  const enRe = /\b([1-9])\s*(sets?|variants?|images?|pics?)\b/gi;
+  let m2;
+  while ((m2 = enRe.exec(text)) !== null) {
+    const n = parseInt(m2[1], 10);
+    if (n >= 1 && n <= MAX_GEN_COUNT) best = Math.max(best, n);
+  }
+  return best;
 }
 
 const REQUEST_TIMEOUT_MS = 55000;
@@ -176,6 +217,15 @@ function HomeInner() {
     image_size: "1:1",
     num: 1,
   });
+  const setParamsClamped = useCallback((next) => {
+    setParams((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      if (!resolved || typeof resolved !== "object") return resolved;
+      const raw = resolved.num ?? prev.num ?? 1;
+      const num = Math.min(MAX_GEN_COUNT, Math.max(1, Number(raw) || 1));
+      return { ...resolved, num };
+    });
+  }, []);
   const [showParams, setShowParams] = useState(false);
   const [conversations, setConversations] = useState([initialConversationRef.current]);
   const [activeConversationId, setActiveConversationId] = useState(initialConversationRef.current.id);
@@ -362,6 +412,19 @@ function HomeInner() {
     );
   }, [updateConversationMessages]);
 
+  const patchTask = useCallback((conversationId, aiMsgId, taskId, patch) => {
+    updateConversationMessages(conversationId, (prev) =>
+      prev.map((m) => {
+        if (m.id !== aiMsgId || !m.tasks) return m;
+        const tasks = m.tasks.map((t) =>
+          t.id === taskId ? { ...t, ...patch } : t
+        );
+        const urls = tasks.filter((t) => t.url).map((t) => t.url);
+        return { ...m, tasks, urls };
+      })
+    );
+  }, [updateConversationMessages]);
+
   const resetComposer = useCallback(() => {
     setPrompt("");
     setRefImages([]);
@@ -385,15 +448,38 @@ function HomeInner() {
       ? await Promise.all(refImages.map((img) => makeMessagePreviewImage(img)))
       : [];
 
+    const inferred = inferLoopCountFromPrompt(text);
+    const count = Math.min(
+      Math.max(Math.max(params.num || 1, inferred), 1),
+      MAX_GEN_COUNT
+    );
+    const genParams = { ...params, num: count };
+
     const userMsg = {
-      id: userMsgId, role: "user", text,
-      params: { ...params }, modelLabel,
+      id: userMsgId,
+      role: "user",
+      text,
+      params: genParams,
+      modelLabel,
       refImages: messageRefImages,
     };
+    const tasks = Array.from({ length: count }, (_, i) => ({
+      id: `${aiMsgId}-task-${i}`,
+      index: i,
+      status: "pending",
+      url: null,
+      error: null,
+    }));
     const aiMsg = {
-      id: aiMsgId, role: "assistant", text,
-      params: { ...params }, modelLabel,
-      status: "generating", urls: [], error: null,
+      id: aiMsgId,
+      role: "assistant",
+      text: "",
+      params: genParams,
+      modelLabel,
+      status: "generating",
+      tasks,
+      urls: [],
+      error: null,
     };
 
     updateConversationMessages(conversationId, (prev) => [...prev, userMsg, aiMsg]);
@@ -414,83 +500,150 @@ function HomeInner() {
           if (typeof img !== "string") {
             return img;
           }
-
-          // Remote URLs should be passed through directly. Re-encoding them in
-          // the browser can fail because of CORS and also wastes payload budget.
           if (/^https?:\/\//i.test(img)) {
             return img;
           }
-
-          // Uploaded/local data URLs are compressed more aggressively so the
-          // Netlify function is less likely to hit an inactivity timeout.
           if (/^data:image\//i.test(img)) {
             return compressImage(img, 768, 0.68);
           }
-
           return img;
         })
       );
 
-      const imageSize = params.image_size === "auto"
-        ? (params._autoRatio || "1:1")
-        : params.image_size;
+      const imageSize =
+        params.image_size === "auto"
+          ? (params._autoRatio || "1:1")
+          : params.image_size;
+      const imagePayload =
+        preparedImages.length === 1 ? preparedImages[0] : preparedImages;
 
-      let res;
-      if (hasImages) {
-        const image = preparedImages.length === 1 ? preparedImages[0] : preparedImages;
-        res = await fetchWithTimeout("/api/edit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: requestController.signal,
-          body: JSON.stringify({
-            prompt: text, image,
-            model: params.model, image_size: imageSize, num: params.num,
-          }),
-        });
-      } else {
-        res = await fetchWithTimeout("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: requestController.signal,
-          body: JSON.stringify({
-            prompt: text,
-            model: params.model, image_size: imageSize, num: params.num,
-          }),
-        });
+      let successCount = 0;
+
+      for (let i = 0; i < count; i++) {
+        if (
+          activeGenerationRef.current?.conversationId !== conversationId ||
+          activeGenerationRef.current?.aiMsgId !== aiMsgId ||
+          activeGenerationRef.current?.cancelled
+        ) {
+          break;
+        }
+
+        const taskId = tasks[i].id;
+        patchTask(conversationId, aiMsgId, taskId, { status: "generating" });
+
+        try {
+          let res;
+          if (hasImages) {
+            res = await fetchWithTimeout("/api/edit", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              signal: requestController.signal,
+              body: JSON.stringify({
+                prompt: text,
+                image: imagePayload,
+                model: params.model,
+                image_size: imageSize,
+                num: 1,
+              }),
+            });
+          } else {
+            res = await fetchWithTimeout("/api/generate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              signal: requestController.signal,
+              body: JSON.stringify({
+                prompt: text,
+                model: params.model,
+                image_size: imageSize,
+                num: 1,
+              }),
+            });
+          }
+
+          const data = await parseApiResponse(res);
+          if (
+            activeGenerationRef.current?.conversationId !== conversationId ||
+            activeGenerationRef.current?.aiMsgId !== aiMsgId ||
+            activeGenerationRef.current?.cancelled
+          ) {
+            break;
+          }
+
+          if (!res.ok || data.error) {
+            patchTask(conversationId, aiMsgId, taskId, {
+              status: "failed",
+              error: errStr(data.error || `请求失败（${res.status}）`),
+            });
+            continue;
+          }
+
+          const urls = data.data?.urls || [];
+          const url = urls[0];
+          if (!url) {
+            patchTask(conversationId, aiMsgId, taskId, {
+              status: "failed",
+              error: "未返回图片",
+            });
+            continue;
+          }
+
+          patchTask(conversationId, aiMsgId, taskId, {
+            status: "completed",
+            url,
+            error: null,
+          });
+          successCount += 1;
+          canvasHistory.push((prev) => [
+            ...prev,
+            {
+              id: `${aiMsgId}-${taskId}`,
+              image_url: url,
+              prompt: text,
+            },
+          ]);
+        } catch (err) {
+          if (
+            activeGenerationRef.current?.conversationId !== conversationId ||
+            activeGenerationRef.current?.aiMsgId !== aiMsgId
+          ) {
+            break;
+          }
+          if (err?.name === "AbortError") {
+            if (!activeGenerationRef.current?.cancelled) {
+              patchTask(conversationId, aiMsgId, taskId, {
+                status: "failed",
+                error: "请求超时。可尝试更小尺寸模型或稍后重试。",
+              });
+            }
+            break;
+          }
+          patchTask(conversationId, aiMsgId, taskId, {
+            status: "failed",
+            error: errStr(err),
+          });
+        }
       }
 
-      const data = await parseApiResponse(res);
       if (
-        activeGenerationRef.current?.conversationId !== conversationId ||
-        activeGenerationRef.current?.aiMsgId !== aiMsgId ||
-        activeGenerationRef.current?.cancelled
+        activeGenerationRef.current?.conversationId === conversationId &&
+        activeGenerationRef.current?.aiMsgId === aiMsgId &&
+        !activeGenerationRef.current?.cancelled
       ) {
-        return;
-      }
-
-      if (!res.ok || data.error) {
         updateMessage(conversationId, aiMsgId, {
-          status: "failed",
-          error: errStr(data.error || `请求失败（${res.status}）`),
+          status: successCount > 0 ? "completed" : "failed",
+          error: successCount === 0 ? "全部任务失败" : null,
         });
-        return;
-      }
-
-      const urls = data.data?.urls || [];
-      if (urls.length > 0) {
-        updateMessage(conversationId, aiMsgId, { status: "completed", urls });
-        const newCanvasImages = urls.map((url, i) => ({
-          id: aiMsgId + "-" + i, image_url: url, prompt: text,
-        }));
-        canvasHistory.push((prev) => [...prev, ...newCanvasImages]);
-        toast(`生成完成，${urls.length} 张图片已添加到画布`, "success");
-      } else {
-        updateMessage(conversationId, aiMsgId, { status: "failed", error: "未返回图片" });
+        toast(
+          successCount > 0
+            ? `生成完成，${successCount}/${count} 张已添加到画布`
+            : `生成结束，0/${count} 张成功`,
+          successCount > 0 ? "success" : "info",
+          2200
+        );
       }
 
       setRefImages([]);
     } catch (err) {
-      const isTimeout = err?.name === "AbortError";
       if (
         activeGenerationRef.current?.conversationId === conversationId &&
         activeGenerationRef.current?.aiMsgId === aiMsgId &&
@@ -498,12 +651,25 @@ function HomeInner() {
       ) {
         return;
       }
-      updateMessage(conversationId, aiMsgId, {
-        status: "failed",
-        error: isTimeout
-          ? "请求超时。当前部署平台可能已超时，请优先尝试 512px / 1K 模型，或稍后重试。"
-          : "请求失败: " + errStr(err),
-      });
+      const msg = errStr(err);
+      updateConversationMessages(conversationId, (prev) =>
+        prev.map((m) => {
+          if (m.id !== aiMsgId) return m;
+          if (!m.tasks?.length) {
+            return { ...m, status: "failed", error: msg };
+          }
+          return {
+            ...m,
+            status: "failed",
+            error: msg,
+            tasks: m.tasks.map((t) =>
+              t.status === "completed"
+                ? t
+                : { ...t, status: "failed", error: msg }
+            ),
+          };
+        })
+      );
     } finally {
       if (
         activeGenerationRef.current?.conversationId === conversationId &&
@@ -514,7 +680,18 @@ function HomeInner() {
       generationAbortRef.current = null;
       setIsGenerating(false);
     }
-  }, [prompt, isGenerating, activeConversationId, params, refImages, updateMessage, updateConversationMessages, canvasHistory, toast]);
+  }, [
+    prompt,
+    isGenerating,
+    activeConversationId,
+    params,
+    refImages,
+    updateMessage,
+    updateConversationMessages,
+    patchTask,
+    canvasHistory,
+    toast,
+  ]);
 
   const handlePauseGenerate = useCallback(() => {
     const currentTask = activeGenerationRef.current;
@@ -523,15 +700,32 @@ function HomeInner() {
     const { conversationId, aiMsgId, controller } = currentTask;
     currentTask.cancelled = true;
 
-    updateMessage(conversationId, aiMsgId, {
-      status: "paused",
-      error: "已手动暂停",
-    });
+    updateConversationMessages(conversationId, (prev) =>
+      prev.map((m) => {
+        if (m.id !== aiMsgId) return m;
+        if (m.tasks?.length) {
+          const tasks = m.tasks.map((t) =>
+            t.status === "pending" || t.status === "generating"
+              ? { ...t, status: "failed", error: "已暂停" }
+              : t
+          );
+          const urls = tasks.filter((t) => t.url).map((t) => t.url);
+          return {
+            ...m,
+            tasks,
+            urls,
+            status: "paused",
+            error: "已手动暂停",
+          };
+        }
+        return { ...m, status: "paused", error: "已手动暂停" };
+      })
+    );
     setIsGenerating(false);
     generationAbortRef.current = null;
     controller.abort();
     toast("已暂停当前生成", "info", 1500);
-  }, [toast, updateMessage]);
+  }, [toast, updateConversationMessages]);
 
   const handleDeleteImage = useCallback((id) => {
     canvasHistory.push((prev) => prev.filter((img) => img.id !== id));
@@ -611,8 +805,8 @@ function HomeInner() {
 
   const handleRetry = useCallback((msg) => {
     setPrompt(msg.text);
-    if (msg.params) setParams(msg.params);
-  }, []);
+    if (msg.params) setParamsClamped(msg.params);
+  }, [setParamsClamped]);
 
   const handleDownload = useCallback(async (msg) => {
     const url = msg.image_url;
@@ -642,9 +836,9 @@ function HomeInner() {
       setActiveConversationId(msg._conversationId);
     }
     if (msg.text) setPrompt(msg.text);
-    if (msg.params) setParams(msg.params);
+    if (msg.params) setParamsClamped(msg.params);
     toast("已载入历史提示词", "info", 1200);
-  }, [toast]);
+  }, [toast, setParamsClamped]);
 
   const handleClearHistory = useCallback(() => {
     setConversations((prev) => prev.map((conversation) => ({
@@ -778,7 +972,7 @@ function HomeInner() {
         onSubmit={handleGenerate}
         isGenerating={isGenerating}
         params={params}
-        onParamsChange={setParams}
+        onParamsChange={setParamsClamped}
         showParams={showParams}
         onToggleParams={() => setShowParams(!showParams)}
         refImages={refImages}

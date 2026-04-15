@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
 const API_BASE = process.env.NANO_API_BASE || "https://api.nanobananaapi.dev";
 const API_KEY = process.env.NANO_API_KEY;
@@ -27,7 +28,7 @@ export async function POST(request) {
       image,
       model: model || "gemini-3.1-flash-image-preview",
       image_size: image_size || "1:1",
-      num: Math.min(Math.max(num || 1, 1), 9),
+      num: Math.min(Math.max(num || 1, 1), MAX_GEN_COUNT),
     };
 
     console.log("[Edit]", JSON.stringify({ ...payload, image: Array.isArray(payload.image) ? `[${payload.image.length} images]` : "1 image" }));
@@ -62,10 +63,13 @@ export async function POST(request) {
     }
 
     const urls = Array.isArray(data.data?.url) ? data.data.url : [data.data?.url];
+    const tasks = urls
+      .filter(Boolean)
+      .map((url, index) => ({ id: `nano-${index}`, index, url, status: "completed" }));
 
     return NextResponse.json({
       success: true,
-      data: { urls },
+      data: { urls, tasks },
     });
   } catch (err) {
     console.error("[Edit] Error:", err);
