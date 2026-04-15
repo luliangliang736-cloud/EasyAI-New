@@ -167,6 +167,7 @@ function HomeInner() {
   const { theme, toggleTheme } = useTheme("dark");
   const initialConversationRef = useRef(createConversation());
   const [activeTool, setActiveTool] = useState("select");
+  const [shapeMode, setShapeMode] = useState("rect");
   const [zoom, setZoom] = useState(100);
   const [prompt, setPrompt] = useState("");
   const [refImages, setRefImages] = useState([]);
@@ -180,10 +181,14 @@ function HomeInner() {
   const [activeConversationId, setActiveConversationId] = useState(initialConversationRef.current.id);
   const canvasHistory = useHistory([]);
   const canvasImages = canvasHistory.state;
+  const canvasTextsHistory = useHistory([]);
+  const canvasTexts = canvasTextsHistory.state;
+  const canvasShapesHistory = useHistory([]);
+  const canvasShapes = canvasShapesHistory.state;
   const [selectedImage, setSelectedImage] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [panelWidth, setPanelWidth] = useState(340);
-  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(true);
   const [historySearch, setHistorySearch] = useState("");
   const canvasRef = useRef(null);
   const generationAbortRef = useRef(null);
@@ -206,6 +211,7 @@ function HomeInner() {
         localStorage.removeItem("lovart-conversations");
         localStorage.removeItem("lovart-active-conversation");
         localStorage.removeItem("lovart-canvas-images");
+        localStorage.removeItem("lovart-canvas-texts");
         localStorage.setItem("lovart-version", STORAGE_VERSION);
         if (legacyMessages) {
           const parsedMessages = JSON.parse(legacyMessages);
@@ -222,6 +228,8 @@ function HomeInner() {
       const saved = localStorage.getItem("lovart-conversations");
       const savedActiveConversationId = localStorage.getItem("lovart-active-conversation");
       const savedImages = localStorage.getItem("lovart-canvas-images");
+      const savedTexts = localStorage.getItem("lovart-canvas-texts");
+      const savedShapes = localStorage.getItem("lovart-canvas-shapes");
       if (saved) {
         const parsedConversations = JSON.parse(saved);
         if (Array.isArray(parsedConversations) && parsedConversations.length > 0) {
@@ -234,10 +242,28 @@ function HomeInner() {
         }
       }
       if (savedImages) canvasHistory.setState(JSON.parse(savedImages));
+      if (savedTexts) {
+        try {
+          const parsed = JSON.parse(savedTexts);
+          if (Array.isArray(parsed)) canvasTextsHistory.setState(parsed);
+        } catch {
+          localStorage.removeItem("lovart-canvas-texts");
+        }
+      }
+      if (savedShapes) {
+        try {
+          const parsed = JSON.parse(savedShapes);
+          if (Array.isArray(parsed)) canvasShapesHistory.setState(parsed);
+        } catch {
+          localStorage.removeItem("lovart-canvas-shapes");
+        }
+      }
     } catch {
       localStorage.removeItem("lovart-conversations");
       localStorage.removeItem("lovart-active-conversation");
       localStorage.removeItem("lovart-canvas-images");
+      localStorage.removeItem("lovart-canvas-texts");
+      localStorage.removeItem("lovart-canvas-shapes");
     }
   }, []);
 
@@ -267,6 +293,52 @@ function HomeInner() {
     }
   }, [canvasImages]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem("lovart-canvas-texts", JSON.stringify(canvasTexts.slice(0, 100)));
+    } catch {
+      localStorage.removeItem("lovart-canvas-texts");
+    }
+  }, [canvasTexts]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("lovart-canvas-shapes", JSON.stringify(canvasShapes.slice(0, 200)));
+    } catch {
+      localStorage.removeItem("lovart-canvas-shapes");
+    }
+  }, [canvasShapes]);
+
+  const handleAddCanvasText = useCallback((item) => {
+    canvasTextsHistory.push((prev) => [...prev, item]);
+  }, [canvasTextsHistory]);
+
+  const handleUpdateCanvasText = useCallback((id, patch) => {
+    canvasTextsHistory.push((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, ...patch } : t))
+    );
+  }, [canvasTextsHistory]);
+
+  const handleDeleteCanvasText = useCallback((id) => {
+    canvasTextsHistory.push((prev) => prev.filter((t) => t.id !== id));
+    toast("已删除文案", "info", 1200);
+  }, [canvasTextsHistory, toast]);
+
+  const handleAddCanvasShape = useCallback((item) => {
+    canvasShapesHistory.push((prev) => [...prev, item]);
+  }, [canvasShapesHistory]);
+
+  const handleUpdateCanvasShape = useCallback((id, patch) => {
+    canvasShapesHistory.push((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, ...patch } : s))
+    );
+  }, [canvasShapesHistory]);
+
+  const handleDeleteCanvasShape = useCallback((id) => {
+    canvasShapesHistory.push((prev) => prev.filter((s) => s.id !== id));
+    toast("已删除形状", "info", 1200);
+  }, [canvasShapesHistory, toast]);
+
   const updateConversationMessages = useCallback((conversationId, updater) => {
     setConversations((prev) => prev.map((conversation) => {
       if (conversation.id !== conversationId) {
@@ -295,7 +367,7 @@ function HomeInner() {
     setRefImages([]);
     setShowParams(false);
     setSelectedImage(null);
-    canvasSelectionRef.current = null;
+    canvasSelectionUrlsRef.current = [];
   }, []);
 
   const handleGenerate = useCallback(async () => {
@@ -476,22 +548,47 @@ function HomeInner() {
 
   const handleUpdateImage = useCallback(() => {}, []);
 
-  // When selecting/deselecting a canvas image, sync it as a ref image in chat
-  const canvasSelectionRef = useRef(null);
+  /** 由画布选中同步到右侧参考图的 URL 列表（单选 / 框选多图） */
+  const canvasSelectionUrlsRef = useRef([]);
+
   const handleSelectImage = useCallback((img) => {
-    // Remove previous canvas-selected image from refImages
-    if (canvasSelectionRef.current) {
-      const prevUrl = canvasSelectionRef.current;
-      setRefImages((prev) => prev.filter((u) => u !== prevUrl));
+    if (!img?.image_url) {
+      setSelectedImage(null);
+      setRefImages((prev) =>
+        prev.filter((u) => !canvasSelectionUrlsRef.current.includes(u))
+      );
+      canvasSelectionUrlsRef.current = [];
+      return;
     }
+    setRefImages((prev) => {
+      const withoutCanvas = prev.filter((u) => !canvasSelectionUrlsRef.current.includes(u));
+      canvasSelectionUrlsRef.current = [img.image_url];
+      const seen = new Set(withoutCanvas);
+      if (!seen.has(img.image_url)) {
+        return [...withoutCanvas, img.image_url];
+      }
+      return withoutCanvas;
+    });
     setSelectedImage(img);
-    if (img?.image_url) {
-      canvasSelectionRef.current = img.image_url;
-      setRefImages((prev) => [...prev, img.image_url]);
-    } else {
-      canvasSelectionRef.current = null;
-    }
   }, []);
+
+  /** 框选多张画布图片时，批量同步到右侧参考图（与模型最大参考图数量对齐） */
+  const MAX_REF_IMAGES = 14;
+  const handleSyncCanvasRefImages = useCallback((urls) => {
+    const list = (urls || []).filter(Boolean);
+    if (list.length < 2) return;
+    setRefImages((prev) => {
+      const withoutCanvas = prev.filter((u) => !canvasSelectionUrlsRef.current.includes(u));
+      canvasSelectionUrlsRef.current = [...list];
+      const merged = [...withoutCanvas];
+      for (const u of list) {
+        if (merged.length >= MAX_REF_IMAGES) break;
+        if (u && !merged.includes(u)) merged.push(u);
+      }
+      return merged;
+    });
+    toast("已同步到右侧参考图", "success", 1500);
+  }, [toast]);
 
   const handleZoomChange = useCallback((updater) => {
     setZoom((prev) => (typeof updater === "function" ? updater(prev) : updater));
@@ -656,6 +753,17 @@ function HomeInner() {
         onToolChange={setActiveTool}
         zoom={zoom}
         onZoomChange={handleZoomChange}
+        textItems={canvasTexts}
+        onAddText={handleAddCanvasText}
+        onUpdateText={handleUpdateCanvasText}
+        onDeleteText={handleDeleteCanvasText}
+        shapeItems={canvasShapes}
+        onAddShape={handleAddCanvasShape}
+        onUpdateShape={handleUpdateCanvasShape}
+        onDeleteShape={handleDeleteCanvasShape}
+        shapeMode={shapeMode}
+        onShapeModeChange={setShapeMode}
+        onSyncCanvasRefImages={handleSyncCanvasRefImages}
       />
       <ChatPanel
         conversations={conversations}

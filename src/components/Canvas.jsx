@@ -7,11 +7,22 @@ import {
 import {
   Maximize2, Download, Trash2, Copy,
   MessageSquare, Lock, Unlock, FileDown, Image as ImageIcon,
+  Minus, Plus,
 } from "lucide-react";
+import { flushSync } from "react-dom";
 import { useToast } from "@/components/Toast";
 import Toolbar from "@/components/Toolbar";
 
 const INITIAL_IMG_WIDTH = 280;
+const DEFAULT_TEXT_FONT = 16;
+const MIN_TEXT_FONT = 10;
+const MAX_TEXT_FONT = 96;
+const MIN_SHAPE_PIXELS = 4;
+
+/** 世界坐标 AABB 相交（含贴边） */
+function worldRectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return !(ax + aw < bx || bx + bw < ax || ay + ah < by || by + bh < ay);
+}
 
 function ContextMenu({ x, y, img, isLocked, onClose, onAction }) {
   const menuRef = useRef(null);
@@ -76,6 +87,17 @@ export default function Canvas({
   onUpdateImage, onSendToChat, onDropImages,
   activeTool, onToolChange, zoom, onZoomChange,
   ref,
+  textItems = [],
+  onAddText,
+  onUpdateText,
+  onDeleteText,
+  shapeItems = [],
+  onAddShape,
+  onUpdateShape,
+  onDeleteShape,
+  shapeMode = "rect",
+  onShapeModeChange,
+  onSyncCanvasRefImages,
 }) {
   const toast = useToast();
   const containerRef = useRef(null);
@@ -86,6 +108,11 @@ export default function Canvas({
   const [contextMenu, setContextMenu] = useState(null);
   const lockedRef = useRef(new Set());
   const [fileDragOver, setFileDragOver] = useState(false);
+  const [selectedTextId, setSelectedTextId] = useState(null);
+  const [editingTextId, setEditingTextId] = useState(null);
+  const [multiSelectedImageIds, setMultiSelectedImageIds] = useState([]);
+  const [multiSelectedTextIds, setMultiSelectedTextIds] = useState([]);
+  const [selectedShapeId, setSelectedShapeId] = useState(null);
 
   actionRef.current = action;
 
@@ -160,24 +187,92 @@ export default function Canvas({
   }), [images, toast]);
 
   useEffect(() => {
+    if (activeTool !== "select") {
+      setMultiSelectedImageIds([]);
+      setMultiSelectedTextIds([]);
+      setSelectedShapeId(null);
+    }
+  }, [activeTool]);
+
+  useEffect(() => {
     const handleKey = (e) => {
+      const tag = document.activeElement?.tagName;
+      const typing = tag === "INPUT" || tag === "TEXTAREA";
+      if (e.key === "Escape") {
+        setContextMenu(null);
+        if (typing) {
+          setEditingTextId(null);
+          return;
+        }
+        setEditingTextId(null);
+        setMultiSelectedImageIds([]);
+        setMultiSelectedTextIds([]);
+        setSelectedShapeId(null);
+        setSelectedTextId(null);
+        onSelectImage?.(null);
+        return;
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedImage && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+        if (typing) return;
+        const isSel = activeTool === "select";
+        if (isSel && selectedShapeId) {
+          e.preventDefault();
+          onDeleteShape?.(selectedShapeId);
+          setSelectedShapeId(null);
+          return;
+        }
+        if (isSel) {
+          const multiImg = multiSelectedImageIds.length;
+          const multiTx = multiSelectedTextIds.length;
+          if (multiImg + multiTx > 0) {
+            e.preventDefault();
+            multiSelectedTextIds.forEach((tid) => onDeleteText?.(tid));
+            multiSelectedImageIds.forEach((iid) => {
+              if (!lockedRef.current.has(iid)) onDeleteImage?.(iid);
+            });
+            setMultiSelectedImageIds([]);
+            setMultiSelectedTextIds([]);
+            setSelectedTextId(null);
+            onSelectImage?.(null);
+            return;
+          }
+          if (selectedTextId) {
+            e.preventDefault();
+            onDeleteText?.(selectedTextId);
+            setSelectedTextId(null);
+            setEditingTextId(null);
+            return;
+          }
+          if (selectedImage) {
+            if (lockedRef.current.has(selectedImage.id)) return;
+            e.preventDefault();
+            onDeleteImage?.(selectedImage.id);
+          }
+          return;
+        }
+        if (selectedTextId) {
+          e.preventDefault();
+          onDeleteText?.(selectedTextId);
+          setSelectedTextId(null);
+          setEditingTextId(null);
+          return;
+        }
+        if (selectedImage) {
           if (lockedRef.current.has(selectedImage.id)) return;
           e.preventDefault();
           onDeleteImage?.(selectedImage.id);
         }
       }
-      if (e.key === "Escape") setContextMenu(null);
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [selectedImage, onDeleteImage]);
+  }, [activeTool, selectedImage, selectedTextId, selectedShapeId, multiSelectedImageIds, multiSelectedTextIds, onDeleteImage, onDeleteText, onDeleteShape, onSelectImage]);
 
   const handleWheel = useCallback((e) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? -5 : 5;
-    onZoomChange?.((prev) => Math.max(1, Math.min(200, prev + delta)));
+    const step = e.ctrlKey ? 35 : 5;
+    const delta = e.deltaY > 0 ? -step : step;
+    onZoomChange?.((prev) => Math.max(1, Math.min(800, prev + delta)));
   }, [onZoomChange]);
 
   useEffect(() => {
@@ -187,13 +282,134 @@ export default function Canvas({
     return () => el.removeEventListener("wheel", handleWheel);
   }, [handleWheel]);
 
+  /** 新建文案后父级 select-none 会导致 textarea 无法选字/输入，需强制 select-text 并拉焦点 */
+  useEffect(() => {
+    if (!editingTextId) return;
+    const id = String(editingTextId).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const el = document.querySelector(`textarea[data-text-editor="${id}"]`);
+    if (el instanceof HTMLTextAreaElement) {
+      el.focus();
+    }
+  }, [editingTextId, textItems]);
+
   const isHandTool = activeTool === "hand";
+  const isTextTool = activeTool === "text";
+  const isSelectTool = activeTool === "select";
+  const isShapeTool = activeTool === "shape";
+
+  /**
+   * 文案块在子层拦截事件。文字工具：单击进入编辑。
+   * 选择工具：单击选中、框选多选、成组拖拽、双击编辑、字号条。
+   */
+  const handleTextItemPointerDown = useCallback(
+    (e, t) => {
+      if (isHandTool) return;
+      if (isShapeTool) return;
+      e.stopPropagation();
+      const totalMulti = multiSelectedImageIds.length + multiSelectedTextIds.length;
+      const inMulti =
+        multiSelectedImageIds.includes(t.id) || multiSelectedTextIds.includes(t.id);
+      if (
+        isSelectTool &&
+        totalMulti > 1 &&
+        inMulti &&
+        multiSelectedTextIds.includes(t.id)
+      ) {
+        const origImages = {};
+        multiSelectedImageIds.forEach((iid) => {
+          const p = positionsRef.current[iid];
+          if (p) origImages[iid] = { ...p };
+        });
+        const origTexts = {};
+        multiSelectedTextIds.forEach((tid) => {
+          const tt = textItems.find((x) => x.id === tid);
+          if (tt) origTexts[tid] = { x: tt.x, y: tt.y };
+        });
+        setAction({
+          type: "group_drag",
+          startX: e.clientX,
+          startY: e.clientY,
+          imageIds: [...multiSelectedImageIds],
+          textIds: [...multiSelectedTextIds],
+          origImages,
+          origTexts,
+        });
+        try {
+          containerRef.current?.setPointerCapture(e.pointerId);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      setMultiSelectedImageIds([]);
+      setMultiSelectedTextIds([]);
+      setSelectedShapeId(null);
+      onSelectImage(null);
+      setSelectedTextId(t.id);
+      if (isTextTool) {
+        setEditingTextId(t.id);
+        return;
+      }
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let dragged = false;
+      const pid = e.pointerId;
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      const onMove = (ev) => {
+        if (dragged) return;
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
+        dragged = true;
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        setAction({
+          type: "textdrag",
+          id: t.id,
+          startX,
+          startY,
+          origX: t.x,
+          origY: t.y,
+        });
+        try {
+          containerRef.current?.setPointerCapture(pid);
+        } catch {
+          /* ignore */
+        }
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [
+      isHandTool, isShapeTool, isTextTool, isSelectTool, onSelectImage,
+      multiSelectedImageIds, multiSelectedTextIds, textItems,
+    ]
+  );
+
+  /** 中键（滚轮按下）：任意工具/编辑状态下均平移画布，需在捕获阶段优先于子元素 */
+  const handleMiddleButtonPanCapture = useCallback((e) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu(null);
+    setAction("pan");
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const handlePointerDown = useCallback((e) => {
+    if (e.button === 1) return;
     if (e.target.closest("[data-toolbar]")) return;
     setContextMenu(null);
     const target = e.target;
+    if (target.closest?.("[data-text-editor]")) return;
+
     const imgEl = target.closest("[data-canvas-item]");
+    const scale = zoom / 100;
 
     if (isHandTool) {
       setAction("pan");
@@ -201,11 +417,93 @@ export default function Canvas({
       return;
     }
 
+    if (isShapeTool && onAddShape) {
+      setEditingTextId(null);
+      setSelectedShapeId(null);
+      onSelectImage(null);
+      setSelectedTextId(null);
+      setMultiSelectedImageIds([]);
+      setMultiSelectedTextIds([]);
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const worldX = (e.clientX - rect.left - camera.x) / scale;
+      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      setAction({
+        type: "shape_draw",
+        kind: shapeMode === "ellipse" ? "ellipse" : "rect",
+        sx: worldX,
+        sy: worldY,
+        cx: worldX,
+        cy: worldY,
+      });
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    const shapeHit = target.closest("[data-shape-item]");
+    if (shapeHit && isSelectTool) {
+      setEditingTextId(null);
+      const sid = shapeHit.dataset.shapeItem;
+      const sh = shapeItems.find((s) => s.id === sid);
+      if (!sh) return;
+      setSelectedShapeId(sid);
+      onSelectImage(null);
+      setSelectedTextId(null);
+      setMultiSelectedImageIds([]);
+      setMultiSelectedTextIds([]);
+      setAction({
+        type: "shape_drag",
+        id: sid,
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: sh.x,
+        origY: sh.y,
+      });
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+
     if (imgEl) {
+      setEditingTextId(null);
+      setSelectedShapeId(null);
       const id = imgEl.dataset.canvasItem;
       const pos = positionsRef.current[id];
       if (!pos) return;
       const img = images.find((i) => i.id === id);
+      const totalMulti = multiSelectedImageIds.length + multiSelectedTextIds.length;
+      const inMulti =
+        multiSelectedImageIds.includes(id) || multiSelectedTextIds.includes(id);
+      if (
+        isSelectTool &&
+        totalMulti > 1 &&
+        inMulti &&
+        multiSelectedImageIds.includes(id)
+      ) {
+        const origImages = {};
+        multiSelectedImageIds.forEach((iid) => {
+          const p = positionsRef.current[iid];
+          if (p) origImages[iid] = { ...p };
+        });
+        const origTexts = {};
+        multiSelectedTextIds.forEach((tid) => {
+          const tt = textItems.find((x) => x.id === tid);
+          if (tt) origTexts[tid] = { x: tt.x, y: tt.y };
+        });
+        setAction({
+          type: "group_drag",
+          startX: e.clientX,
+          startY: e.clientY,
+          imageIds: [...multiSelectedImageIds],
+          textIds: [...multiSelectedTextIds],
+          origImages,
+          origTexts,
+        });
+        e.currentTarget.setPointerCapture(e.pointerId);
+        return;
+      }
+      setMultiSelectedImageIds([]);
+      setMultiSelectedTextIds([]);
+      setSelectedTextId(null);
       if (img) onSelectImage(img);
       if (lockedRef.current.has(id)) return;
       setAction({
@@ -213,12 +511,60 @@ export default function Canvas({
         startX: e.clientX, startY: e.clientY,
         origX: pos.x, origY: pos.y,
       });
-    } else {
-      onSelectImage(null);
-      setAction("pan");
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
     }
+
+    if (isTextTool && onAddText) {
+      onSelectImage(null);
+      setSelectedShapeId(null);
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const worldX = (e.clientX - rect.left - camera.x) / scale;
+      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      const nid = `text-${Date.now()}`;
+      // 同步写入父级文案列表，再进入编辑，否则首帧 textItems 尚未含 nid，无法立刻出现输入框
+      flushSync(() => {
+        onAddText({ id: nid, text: "", x: worldX, y: worldY, fontSize: DEFAULT_TEXT_FONT });
+      });
+      setSelectedTextId(nid);
+      setEditingTextId(nid);
+      return;
+    }
+
+    if (isSelectTool) {
+      onSelectImage(null);
+      setSelectedTextId(null);
+      setEditingTextId(null);
+      setSelectedShapeId(null);
+      setMultiSelectedImageIds([]);
+      setMultiSelectedTextIds([]);
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const worldX = (e.clientX - rect.left - camera.x) / scale;
+      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      setAction({
+        type: "marquee",
+        sx: worldX,
+        sy: worldY,
+        cx: worldX,
+        cy: worldY,
+      });
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    onSelectImage(null);
+    setSelectedTextId(null);
+    setEditingTextId(null);
+    setAction("pan");
     e.currentTarget.setPointerCapture(e.pointerId);
-  }, [images, onSelectImage, isHandTool]);
+  }, [
+    images, onSelectImage, isHandTool, isTextTool, isSelectTool, isShapeTool, onAddText,
+    camera, zoom,
+    multiSelectedImageIds, multiSelectedTextIds, textItems,
+    shapeItems, shapeMode,
+  ]);
 
   const handlePointerMove = useCallback((e) => {
     const act = actionRef.current;
@@ -226,6 +572,22 @@ export default function Canvas({
     const scale = zoom / 100;
     if (act === "pan") {
       setCamera((prev) => ({ x: prev.x + e.movementX, y: prev.y + e.movementY }));
+    } else if (act.type === "shape_draw") {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const worldX = (e.clientX - rect.left - camera.x) / scale;
+      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      setAction({ ...act, cx: worldX, cy: worldY });
+    } else if (act.type === "shape_drag" && onUpdateShape) {
+      const dx = (e.clientX - act.startX) / scale;
+      const dy = (e.clientY - act.startY) / scale;
+      onUpdateShape(act.id, { x: act.origX + dx, y: act.origY + dy });
+    } else if (act.type === "marquee") {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const worldX = (e.clientX - rect.left - camera.x) / scale;
+      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      setAction({ ...act, cx: worldX, cy: worldY });
     } else if (act.type === "drag") {
       const dx = (e.clientX - act.startX) / scale;
       const dy = (e.clientY - act.startY) / scale;
@@ -234,18 +596,136 @@ export default function Canvas({
         x: act.origX + dx, y: act.origY + dy,
       };
       forceRender();
+    } else if (act.type === "group_drag" && onUpdateText) {
+      const dx = (e.clientX - act.startX) / scale;
+      const dy = (e.clientY - act.startY) / scale;
+      act.imageIds.forEach((iid) => {
+        if (lockedRef.current.has(iid)) return;
+        const o = act.origImages[iid];
+        if (o && positionsRef.current[iid]) {
+          positionsRef.current[iid] = {
+            ...positionsRef.current[iid],
+            x: o.x + dx,
+            y: o.y + dy,
+          };
+        }
+      });
+      act.textIds.forEach((tid) => {
+        const o = act.origTexts[tid];
+        if (o) onUpdateText(tid, { x: o.x + dx, y: o.y + dy });
+      });
+      forceRender();
+    } else if (act.type === "textdrag" && onUpdateText) {
+      const dx = (e.clientX - act.startX) / scale;
+      const dy = (e.clientY - act.startY) / scale;
+      onUpdateText(act.id, { x: act.origX + dx, y: act.origY + dy });
     }
-  }, [zoom]);
+  }, [zoom, onUpdateText, onUpdateShape, camera]);
 
   const handlePointerUp = useCallback((e) => {
     const act = actionRef.current;
+    if (act && act.type === "shape_draw" && onAddShape) {
+      const x1 = Math.min(act.sx, act.cx);
+      const y1 = Math.min(act.sy, act.cy);
+      const w = Math.abs(act.cx - act.sx);
+      const h = Math.abs(act.cy - act.sy);
+      if (w >= MIN_SHAPE_PIXELS && h >= MIN_SHAPE_PIXELS) {
+        onAddShape({
+          id: `shape-${Date.now()}`,
+          kind: act.kind,
+          x: x1,
+          y: y1,
+          w,
+          h,
+        });
+      }
+      setAction(null);
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+      return;
+    }
+    if (act && act.type === "marquee") {
+      const mx1 = Math.min(act.sx, act.cx);
+      const my1 = Math.min(act.sy, act.cy);
+      const mx2 = Math.max(act.sx, act.cx);
+      const my2 = Math.max(act.sy, act.cy);
+      const mw = mx2 - mx1;
+      const mh = my2 - my1;
+      if (mw < 1 && mh < 1) {
+        setMultiSelectedImageIds([]);
+        setMultiSelectedTextIds([]);
+        setSelectedShapeId(null);
+      } else {
+        setSelectedShapeId(null);
+        const hitsImg = [];
+        images.forEach((im) => {
+          const p = positionsRef.current[im.id];
+          if (!p) return;
+          const meta = imageMetaRef.current[im.id];
+          const ih = meta ? (p.w * meta.height) / meta.width : p.w;
+          if (worldRectsOverlap(p.x, p.y, p.w, ih, mx1, my1, mw, mh)) {
+            hitsImg.push(im.id);
+          }
+        });
+        const hitsTx = [];
+        const crect = containerRef.current?.getBoundingClientRect();
+        if (crect && containerRef.current) {
+          containerRef.current.querySelectorAll("[data-text-item]").forEach((el) => {
+            const id = el.dataset.textItem;
+            if (!id) return;
+            const r = el.getBoundingClientRect();
+            const left = (r.left - crect.left - camera.x) / (zoom / 100);
+            const top = (r.top - crect.top - camera.y) / (zoom / 100);
+            const tw = r.width / (zoom / 100);
+            const th = r.height / (zoom / 100);
+            if (worldRectsOverlap(left, top, tw, th, mx1, my1, mw, mh)) {
+              hitsTx.push(id);
+            }
+          });
+        }
+        setMultiSelectedImageIds(hitsImg);
+        setMultiSelectedTextIds(hitsTx);
+        if (hitsImg.length >= 2) {
+          const urls = hitsImg
+            .map((id) => images.find((im) => im.id === id)?.image_url)
+            .filter(Boolean);
+          if (urls.length >= 2) {
+            onSyncCanvasRefImages?.(urls);
+          }
+        }
+        const totalHits = hitsImg.length + hitsTx.length;
+        if (totalHits === 1) {
+          if (hitsImg.length === 1) {
+            const one = images.find((im) => im.id === hitsImg[0]);
+            if (one) onSelectImage?.(one);
+            setSelectedTextId(null);
+            setMultiSelectedImageIds([]);
+            setMultiSelectedTextIds([]);
+          } else if (hitsTx.length === 1) {
+            onSelectImage?.(null);
+            setSelectedTextId(hitsTx[0]);
+            setMultiSelectedImageIds([]);
+            setMultiSelectedTextIds([]);
+          }
+        }
+      }
+      setAction(null);
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+      return;
+    }
+    if (act && act.type === "group_drag") {
+      act.imageIds.forEach((iid) => {
+        if (lockedRef.current.has(iid)) return;
+        const pos = positionsRef.current[iid];
+        if (pos) onUpdateImage?.(iid, pos);
+      });
+    }
     if (act && act.type === "drag") {
       const pos = positionsRef.current[act.id];
       if (pos) onUpdateImage?.(act.id, pos);
     }
     setAction(null);
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
-  }, [onUpdateImage]);
+  }, [onUpdateImage, onSelectImage, onAddShape, onSyncCanvasRefImages, images, camera, zoom]);
 
   const handleContextMenu = useCallback((e) => {
     e.preventDefault();
@@ -337,10 +817,23 @@ export default function Canvas({
   const scale = zoom / 100;
   const isPanning = action === "pan";
   const isDragging = action?.type === "drag";
+  const isDraggingText = action?.type === "textdrag";
+  const isMarquee = action?.type === "marquee";
+  const isGroupDrag = action?.type === "group_drag";
 
   const cursor = isHandTool
     ? (isPanning ? "cursor-grabbing" : "cursor-grab")
-    : (isPanning ? "cursor-grabbing" : isDragging ? "cursor-move" : "cursor-default");
+    : isShapeTool
+      ? "cursor-crosshair"
+      : isMarquee || action?.type === "shape_draw"
+        ? "cursor-crosshair"
+        : isPanning
+          ? "cursor-grabbing"
+          : isDraggingText || isDragging || isGroupDrag
+            ? "cursor-move"
+            : isTextTool
+              ? "cursor-text"
+              : "cursor-default";
 
   return (
     <div
@@ -349,6 +842,7 @@ export default function Canvas({
       style={{
         background: "var(--bg-primary)",
       }}
+      onPointerDownCapture={handleMiddleButtonPanCapture}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -366,15 +860,15 @@ export default function Canvas({
         </div>
       )}
 
-      {/* World layer */}
+      {/* World layer：铺满画布便于命中；子元素为绝对定位 */}
       <div
-        className="absolute"
+        className="absolute inset-0 z-10"
         style={{
           transform: `translate(${camera.x}px, ${camera.y}px) scale(${scale})`,
           transformOrigin: "0 0",
         }}
       >
-        {images.length === 0 && !fileDragOver && (
+        {images.length === 0 && textItems.length === 0 && shapeItems.length === 0 && !fileDragOver && (
           <div
             className="pointer-events-none absolute flex flex-col items-center justify-center text-center"
             style={{ left: "50%", top: "50%", transform: `translate(-50%, -50%) scale(${1 / scale})`, width: 300 }}
@@ -387,19 +881,56 @@ export default function Canvas({
               </svg>
             </div>
             <p className="text-sm text-text-tertiary opacity-40">在右侧面板输入提示词开始生成</p>
-            <p className="text-xs text-text-tertiary opacity-25 mt-1">拖拽平移 · 滚轮缩放 · 拖入图片 · 右键菜单</p>
+            <p className="text-xs text-text-tertiary opacity-25 mt-1">拖拽平移 · 滚轮缩放 · 拖入图片 · 文字工具添加文案 · 右键菜单</p>
           </div>
         )}
+
+        {action?.type === "marquee" && (() => {
+          const a = action;
+          const x = Math.min(a.sx, a.cx);
+          const y = Math.min(a.sy, a.cy);
+          const w = Math.abs(a.cx - a.sx);
+          const h = Math.abs(a.cy - a.sy);
+          return (
+            <div
+              className="absolute pointer-events-none z-[5] border border-accent/70 bg-accent/15 rounded-sm"
+              style={{ left: x, top: y, width: w, height: h }}
+            />
+          );
+        })()}
+
+        {action?.type === "shape_draw" && (() => {
+          const a = action;
+          const x = Math.min(a.sx, a.cx);
+          const y = Math.min(a.sy, a.cy);
+          const w = Math.abs(a.cx - a.sx);
+          const h = Math.abs(a.cy - a.sy);
+          return (
+            <div
+              className={`absolute pointer-events-none z-[12] border-2 border-dashed border-emerald-400/90 bg-emerald-500/10 ${
+                a.kind === "ellipse" ? "rounded-full" : "rounded-md"
+              }`}
+              style={{ left: x, top: y, width: w, height: h }}
+            />
+          );
+        })()}
 
         {images.map((img) => {
           const pos = positionsRef.current[img.id];
           if (!pos) return null;
-          const isSelected = selectedImage?.id === img.id;
+          const isHighlighted =
+            selectedImage?.id === img.id || multiSelectedImageIds.includes(img.id);
+          const isChromeSingle =
+            isHighlighted && multiSelectedImageIds.length === 0;
           const isLocked = lockedRef.current.has(img.id);
           const meta = imageMetaRef.current[img.id];
           const displayHeight = meta
             ? Math.round((pos.w * meta.height) / meta.width)
             : Math.round(pos.w);
+          const sizeLabel =
+            meta?.width && meta?.height
+              ? `${meta.width} × ${meta.height} px`
+              : `${Math.round(pos.w)} × ${displayHeight}`;
 
           return (
             <div
@@ -408,90 +939,223 @@ export default function Canvas({
               className={`absolute group ${isLocked ? "opacity-90" : ""}`}
               style={{ left: pos.x, top: pos.y, width: pos.w }}
             >
-              <div className={`rounded-xl overflow-hidden border-2 transition-colors ${
-                isSelected ? "border-accent" : "border-transparent hover:border-border-secondary"
-              }`}>
-                <img
-                  src={img.image_url}
-                  alt={img.prompt}
-                  className="w-full block pointer-events-none"
-                  draggable={false}
-                  onLoad={(e) => {
-                    const { naturalWidth, naturalHeight } = e.currentTarget;
-                    if (naturalWidth && naturalHeight) {
-                      imageMetaRef.current[img.id] = {
-                        width: naturalWidth,
-                        height: naturalHeight,
-                      };
-                      forceRender();
-                    }
-                  }}
-                />
+              {isChromeSingle && (
+                <div className="absolute -top-6 left-0 right-0 flex items-center justify-between text-[10px] text-accent pointer-events-none z-10">
+                  <div className="flex items-center gap-1.5 px-1.5 py-0.5 rounded-md bg-bg-primary/90 border border-accent/40">
+                    <ImageIcon size={10} />
+                    <span>{img.prompt || "Image"}</span>
+                  </div>
+                  <div className="px-1.5 py-0.5 rounded-md bg-bg-primary/90 border border-accent/40" title="原图像素尺寸">
+                    {sizeLabel}
+                  </div>
+                </div>
+              )}
 
-                <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); window.open(img.image_url, "_blank"); }}
-                    className="p-1.5 rounded-lg bg-black/60 text-white hover:bg-black/80 backdrop-blur-sm transition-all" title="查看原图">
-                    <Maximize2 size={14} />
-                  </button>
-                  <button onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); handleContextAction("export", img); }}
-                    className="p-1.5 rounded-lg bg-black/60 text-white hover:bg-black/80 backdrop-blur-sm transition-all" title="下载">
-                    <Download size={14} />
-                  </button>
-                  <button onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); if (!isLocked) onDeleteImage?.(img.id); }}
-                    className={`p-1.5 rounded-lg bg-black/60 backdrop-blur-sm transition-all ${isLocked ? "text-zinc-600 cursor-not-allowed" : "text-red-400 hover:bg-red-500/80 hover:text-white"}`} title={isLocked ? "已锁定" : "删除"}>
-                    <Trash2 size={14} />
-                  </button>
+              {/* 选区手柄相对图片线框定位，避免与下方标题栏错位 */}
+              <div className="relative w-full">
+                <div className={`rounded-xl overflow-hidden border-2 transition-colors ${
+                  isHighlighted ? "border-accent" : "border-transparent hover:border-border-secondary"
+                }`}>
+                  <img
+                    src={img.image_url}
+                    alt={img.prompt}
+                    className="w-full block pointer-events-none"
+                    draggable={false}
+                    onLoad={(e) => {
+                      const { naturalWidth, naturalHeight } = e.currentTarget;
+                      if (naturalWidth && naturalHeight) {
+                        imageMetaRef.current[img.id] = {
+                          width: naturalWidth,
+                          height: naturalHeight,
+                        };
+                        forceRender();
+                      }
+                    }}
+                  />
+
+                  <div
+                    className={`absolute top-2 right-2 flex gap-1 transition-opacity ${
+                      isHighlighted ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    }`}
+                  >
+                    <button onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); window.open(img.image_url, "_blank"); }}
+                      className="p-1.5 rounded-lg bg-black/60 text-white hover:bg-black/80 backdrop-blur-sm transition-all" title="查看原图">
+                      <Maximize2 size={14} />
+                    </button>
+                    <button onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); handleContextAction("export", img); }}
+                      className="p-1.5 rounded-lg bg-black/60 text-white hover:bg-black/80 backdrop-blur-sm transition-all" title="下载">
+                      <Download size={14} />
+                    </button>
+                    <button onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); if (!isLocked) onDeleteImage?.(img.id); }}
+                      className={`p-1.5 rounded-lg bg-black/60 backdrop-blur-sm transition-all ${isLocked ? "text-zinc-600 cursor-not-allowed" : "text-red-400 hover:bg-red-500/80 hover:text-white"}`} title={isLocked ? "已锁定" : "删除"}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+
+                  {isLocked && (
+                    <div className="absolute top-2 left-2 p-1.5 rounded-lg bg-black/60 text-amber-400 backdrop-blur-sm">
+                      <Lock size={12} />
+                    </div>
+                  )}
                 </div>
 
-                {isLocked && (
-                  <div className="absolute top-2 left-2 p-1.5 rounded-lg bg-black/60 text-amber-400 backdrop-blur-sm">
-                    <Lock size={12} />
-                  </div>
+                {isChromeSingle && (
+                  <>
+                    <div className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px] pointer-events-none" />
+                    <div className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px] pointer-events-none" />
+                    <div className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px] pointer-events-none" />
+                    {isLocked ? (
+                      <div className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px] pointer-events-none" />
+                    ) : (
+                      <div
+                        className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary rounded-[2px] cursor-nwse-resize border-2 border-accent"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          const startX = e.clientX;
+                          const startW = pos.w;
+                          const onMove = (ev) => {
+                            const dw = (ev.clientX - startX) / scale;
+                            positionsRef.current[img.id] = { ...positionsRef.current[img.id], w: Math.max(120, startW + dw) };
+                            forceRender();
+                          };
+                          const onUp = () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
+                          window.addEventListener("pointermove", onMove);
+                          window.addEventListener("pointerup", onUp);
+                        }}
+                      />
+                    )}
+                  </>
                 )}
               </div>
 
-              {isSelected && (
-                <>
-                  <div className="absolute -top-6 left-0 right-0 flex items-center justify-between text-[10px] text-accent pointer-events-none">
-                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 rounded-md bg-bg-primary/90 border border-accent/40">
-                      <ImageIcon size={10} />
-                      <span>{img.prompt || "Image"}</span>
-                    </div>
-                    <div className="px-1.5 py-0.5 rounded-md bg-bg-primary/90 border border-accent/40">
-                      {Math.round(pos.w)} × {displayHeight}
-                    </div>
-                  </div>
-
-                  <div className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px]" />
-                  <div className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px]" />
-                  <div className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-bg-primary border-2 border-accent rounded-[2px]" />
-                </>
-              )}
-
-              <p className="text-[10px] text-text-tertiary mt-1 truncate px-0.5 pointer-events-none">
+              <p className="text-[10px] text-text-tertiary truncate px-0.5 pointer-events-none mt-0 pt-1 leading-tight bg-bg-primary/85 border-t border-accent/25 rounded-b-lg">
                 {img.prompt}
               </p>
+            </div>
+          );
+        })}
 
-              {isSelected && !isLocked && (
+        {shapeItems.map((s) => (
+          <div
+            key={s.id}
+            data-shape-item={s.id}
+            className={`absolute z-[15] pointer-events-auto border-2 transition-colors ${
+              selectedShapeId === s.id
+                ? "border-accent shadow-[0_0_0_1px_rgba(63,202,88,0.35)]"
+                : "border-white/45 hover:border-white/70"
+            } ${s.kind === "ellipse" ? "rounded-full" : "rounded-lg"}`}
+            style={{
+              left: s.x,
+              top: s.y,
+              width: s.w,
+              height: s.h,
+              background: "rgba(63, 202, 88, 0.06)",
+            }}
+          />
+        ))}
+
+        {textItems.map((t) => {
+          const isHighlighted =
+            selectedTextId === t.id || multiSelectedTextIds.includes(t.id);
+          const isEditing = editingTextId === t.id;
+          const fontPx = Math.min(MAX_TEXT_FONT, Math.max(MIN_TEXT_FONT, t.fontSize ?? DEFAULT_TEXT_FONT));
+          const bumpFont = (delta) => {
+            const next = Math.min(MAX_TEXT_FONT, Math.max(MIN_TEXT_FONT, fontPx + delta));
+            onUpdateText?.(t.id, { fontSize: next });
+          };
+          const showSelectBar =
+            isSelectTool &&
+            isHighlighted &&
+            !isEditing &&
+            multiSelectedImageIds.length + multiSelectedTextIds.length <= 1;
+          return (
+            <div
+              key={t.id}
+              data-text-item={t.id}
+              className={`absolute z-[25] max-w-[min(92vw,480px)] ${
+                isHighlighted && !isEditing ? "outline outline-1 outline-accent/70 outline-offset-2 rounded-sm" : ""
+              } ${isSelectTool && !isEditing ? "cursor-move" : ""}`}
+              style={{ left: t.x, top: t.y }}
+              onPointerDown={(e) => {
+                if (isEditing) return;
+                handleTextItemPointerDown(e, t);
+              }}
+            >
+              {showSelectBar && (
                 <div
-                  className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-bg-primary rounded-[2px] cursor-nwse-resize border-2 border-accent"
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    const startX = e.clientX;
-                    const startW = pos.w;
-                    const onMove = (ev) => {
-                      const dw = (ev.clientX - startX) / scale;
-                      positionsRef.current[img.id] = { ...positionsRef.current[img.id], w: Math.max(120, startW + dw) };
-                      forceRender();
-                    };
-                    const onUp = () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
-                    window.addEventListener("pointermove", onMove);
-                    window.addEventListener("pointerup", onUp);
-                  }}
+                  className="absolute -top-9 left-0 flex items-center gap-0.5 rounded-lg bg-bg-secondary/95 border border-border-primary px-1 py-0.5 shadow-md pointer-events-auto"
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    title="缩小字号"
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                    onClick={() => bumpFont(-2)}
+                  >
+                    <Minus size={14} />
+                  </button>
+                  <span className="text-[10px] text-text-tertiary tabular-nums min-w-[2.25rem] text-center">{fontPx}px</span>
+                  <button
+                    type="button"
+                    title="放大字号"
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                    onClick={() => bumpFont(2)}
+                  >
+                    <Plus size={14} />
+                  </button>
+                  <div className="w-px h-5 bg-border-primary mx-0.5" />
+                  <button
+                    type="button"
+                    title="删除文案"
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-text-secondary hover:text-red-400 hover:bg-red-500/15 transition-colors"
+                    onClick={() => {
+                      onDeleteText?.(t.id);
+                      setSelectedTextId(null);
+                      setEditingTextId(null);
+                    }}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              )}
+              {isEditing ? (
+                <textarea
+                  data-text-editor={t.id}
+                  value={t.text}
+                  onChange={(e) => onUpdateText?.(t.id, { text: e.target.value })}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onBlur={() => setEditingTextId(null)}
+                  autoFocus
+                  rows={4}
+                  placeholder="输入文案…"
+                  style={{ fontSize: fontPx }}
+                  className="w-[min(92vw,420px)] min-h-[4em] resize-y rounded-sm bg-transparent border-0 px-0.5 py-0 text-text-primary placeholder-text-tertiary/80 outline-none focus:ring-0 focus:shadow-[0_0_0_1px_rgba(63,202,88,0.5)] select-text leading-relaxed"
                 />
+              ) : (
+                <div
+                  role="presentation"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setMultiSelectedImageIds([]);
+                    setMultiSelectedTextIds([]);
+                    setSelectedShapeId(null);
+                    setSelectedTextId(t.id);
+                    setEditingTextId(t.id);
+                  }}
+                  style={{ fontSize: fontPx }}
+                  className={`max-w-[min(92vw,480px)] whitespace-pre-wrap leading-relaxed ${
+                    isSelectTool && !isEditing ? "cursor-move" : "cursor-text"
+                  } ${
+                    t.text.trim()
+                      ? "text-text-primary [text-shadow:0_1px_3px_rgba(0,0,0,0.85),0_0_12px_rgba(0,0,0,0.35)]"
+                      : "text-text-tertiary/90 [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]"
+                  }`}
+                >
+                  {t.text.trim() ? t.text : "选择工具：单击选中 · 拖拽移动 · 双击编辑"}
+                </div>
               )}
             </div>
           );
@@ -505,6 +1169,8 @@ export default function Canvas({
           onToolChange={onToolChange}
           zoom={zoom}
           onZoomChange={onZoomChange}
+          shapeMode={shapeMode}
+          onShapeModeChange={onShapeModeChange}
         />
       </div>
 

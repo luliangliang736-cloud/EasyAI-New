@@ -76,26 +76,39 @@ const MODEL_TIERS = [
 const STANDARD_RATIOS = ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4"];
 const EXTENDED_RATIOS = ["21:9", "1:4", "4:1", "8:1", "1:8"];
 
-function detectImageRatio(dataUrl) {
+/**
+ * 读取参考图真实像素尺寸，并匹配最接近的标准比例供 API 使用。
+ */
+function detectRefImageMeta(dataUrl) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const { width, height } = img;
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
       const r = width / height;
       const candidates = [
         [1, 1], [16, 9], [9, 16], [4, 3], [3, 4],
         [3, 2], [2, 3], [4, 5], [5, 4],
         [21, 9], [1, 4], [4, 1], [8, 1], [1, 8],
       ];
-      let best = "1:1";
+      let ratio = "1:1";
       let minDiff = Infinity;
       for (const [w, h] of candidates) {
         const diff = Math.abs(r - w / h);
-        if (diff < minDiff) { minDiff = diff; best = `${w}:${h}`; }
+        if (diff < minDiff) {
+          minDiff = diff;
+          ratio = `${w}:${h}`;
+        }
       }
-      resolve(best);
+      resolve({
+        ratio,
+        width,
+        height,
+        dimensionsLabel: width > 0 && height > 0 ? `${width} × ${height}` : "",
+      });
     };
-    img.onerror = () => resolve("1:1");
+    img.onerror = () =>
+      resolve({ ratio: "1:1", width: 0, height: 0, dimensionsLabel: "" });
     img.src = dataUrl;
   });
 }
@@ -317,7 +330,6 @@ export default function ChatPanel({
   }, [showConversationMenu]);
 
   const currentTier = MODEL_TIERS.find((t) => t.variants.some((v) => v.model === params.model)) || MODEL_TIERS[1];
-  const currentVariant = currentTier.variants.find((v) => v.model === params.model) || currentTier.variants[1];
   const availableRatios = currentTier.extendedRatios ? [...STANDARD_RATIOS, ...EXTENDED_RATIOS] : STANDARD_RATIOS;
   const maxImages = currentTier.maxInputImages;
   const filteredConversations = conversations
@@ -343,12 +355,47 @@ export default function ChatPanel({
     });
   }, []);
 
+  /** 固定比例时清除 _autoRatio；选 Auto 时按首张参考图重新识别 */
+  const applyRatio = useCallback(
+    async (r) => {
+      if (r === "auto") {
+        if (refImages?.length > 0) {
+          const meta = await detectRefImageMeta(refImages[0]);
+          onParamsChange((p) => ({
+            ...p,
+            image_size: "auto",
+            _autoRatio: meta.ratio,
+            _autoDimensions: meta.dimensionsLabel || undefined,
+          }));
+        } else {
+          onParamsChange((p) => ({
+            ...p,
+            image_size: "auto",
+            _autoRatio: undefined,
+            _autoDimensions: undefined,
+          }));
+        }
+        return;
+      }
+      onParamsChange((p) => ({
+        ...p,
+        image_size: r,
+        _autoRatio: undefined,
+        _autoDimensions: undefined,
+      }));
+    },
+    [refImages, onParamsChange]
+  );
+
   const addImages = useCallback(async (files) => {
     const remaining = maxImages - (refImages?.length || 0);
     const toProcess = Array.from(files).slice(0, remaining);
+    const firstBefore = refImages?.[0];
+    const rawDataUrls = await Promise.all(
+      toProcess.map((file) => readFileAsDataURL(file))
+    );
     const results = await Promise.all(
-      toProcess.map(async (file) => {
-        const dataUrl = await readFileAsDataURL(file);
+      rawDataUrls.map(async (dataUrl) => {
         try {
           return await compressImage(dataUrl, 1280, 0.78);
         } catch {
@@ -357,16 +404,52 @@ export default function ChatPanel({
       })
     );
     const newImages = [...(refImages || []), ...results];
+    const firstAfter = newImages[0];
     onRefImagesChange(newImages);
-    if (params.image_size === "auto" && results.length > 0) {
-      const detected = await detectImageRatio(results[0]);
-      onParamsChange({ ...params, image_size: "auto", _autoRatio: detected });
+    // 首张参考图变化时：Auto 下匹配 API 比例；尺寸优先用本次首张的原始文件像素（未压缩前）
+    if (newImages.length > 0 && firstAfter !== firstBefore) {
+      const srcForMeta =
+        firstBefore === undefined && rawDataUrls.length > 0
+          ? rawDataUrls[0]
+          : firstAfter;
+      const meta = await detectRefImageMeta(srcForMeta);
+      onParamsChange((p) => ({
+        ...p,
+        image_size: "auto",
+        _autoRatio: meta.ratio,
+        _autoDimensions: meta.dimensionsLabel || undefined,
+      }));
     }
-  }, [refImages, maxImages, onRefImagesChange, params, onParamsChange]);
+  }, [refImages, maxImages, onRefImagesChange, onParamsChange]);
 
-  const removeImage = useCallback((index) => {
-    onRefImagesChange(refImages.filter((_, i) => i !== index));
-  }, [refImages, onRefImagesChange]);
+  const removeImage = useCallback(
+    (index) => {
+      const next = refImages.filter((_, i) => i !== index);
+      onRefImagesChange(next);
+      if (next.length === 0) {
+        onParamsChange((p) =>
+          p.image_size === "auto"
+            ? { ...p, _autoRatio: undefined, _autoDimensions: undefined }
+            : p
+        );
+        return;
+      }
+      if (index === 0) {
+        void detectRefImageMeta(next[0]).then((meta) => {
+          onParamsChange((p) =>
+            p.image_size === "auto"
+              ? {
+                  ...p,
+                  _autoRatio: meta.ratio,
+                  _autoDimensions: meta.dimensionsLabel || undefined,
+                }
+              : p
+          );
+        });
+      }
+    },
+    [refImages, onRefImagesChange, onParamsChange]
+  );
 
   const handleFileSelect = (e) => {
     if (e.target.files?.length) addImages(e.target.files);
@@ -606,10 +689,7 @@ export default function ChatPanel({
             className="flex items-center gap-1.5 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors w-full">
             <Settings2 size={12} />
             <span>生成参数</span>
-            <ChevronDown size={12} className={`transition-transform ${showParams ? "rotate-180" : ""}`} />
-            <span className="ml-auto text-text-tertiary">
-              {currentTier.name} · {currentVariant.label} · {params.image_size === "auto" ? `Auto${params._autoRatio ? `(${params._autoRatio})` : ""}` : params.image_size}
-            </span>
+            <ChevronDown size={12} className={`ml-auto transition-transform ${showParams ? "rotate-180" : ""}`} />
           </button>
 
           {showParams && (
@@ -651,17 +731,21 @@ export default function ChatPanel({
                 </span>
                 <div className="flex gap-1 flex-wrap">
                   {availableRatios.map((r) => (
-                    <button key={r} onClick={() => onParamsChange({ ...params, image_size: r })}
+                    <button key={r} onClick={() => void applyRatio(r)}
                       className={`px-2 py-1 rounded-md text-[10px] font-medium transition-all ${params.image_size === r ? "bg-accent text-white" : r === "auto" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20" : EXTENDED_RATIOS.includes(r) ? "bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20" : "bg-bg-tertiary text-text-secondary hover:bg-bg-hover border border-border-primary"}`}>
                       {r === "auto" ? "Auto" : r}
                     </button>
                   ))}
                 </div>
-                {params.image_size === "auto" && params._autoRatio && (
-                  <p className="text-[10px] text-emerald-400 mt-1">已识别: {params._autoRatio}</p>
+                {params.image_size === "auto" && params._autoDimensions && (
+                  <p className="text-[10px] text-emerald-400 mt-1">
+                    已识别: {params._autoDimensions} px
+                  </p>
                 )}
-                {params.image_size === "auto" && !params._autoRatio && (
-                  <p className="text-[10px] text-text-tertiary mt-1">上传图片后自动识别比例</p>
+                {params.image_size === "auto" && !params._autoDimensions && (
+                  <p className="text-[10px] text-text-tertiary mt-1">
+                    上传参考图后显示具体宽高（像素）
+                  </p>
                 )}
               </div>
               <div>

@@ -106,8 +106,11 @@ export default function HomePage() {
           {FEATURES.map((f, i) => {
             const Icon = f.icon;
             return (
-              <div key={i} className="rounded-2xl bg-bg-secondary p-6 hover:bg-bg-hover transition-all duration-200 group">
-                <div className={`w-10 h-10 rounded-xl bg-bg-tertiary flex items-center justify-center mb-4 ${f.iconColor} group-hover:scale-110 transition-transform`}>
+              <div
+                key={i}
+                className="rounded-2xl bg-bg-secondary p-6 hover:bg-bg-hover transition-all duration-300 ease-out hover:scale-[1.04] hover:shadow-lg hover:shadow-black/20 origin-center will-change-transform"
+              >
+                <div className={`w-10 h-10 rounded-xl bg-bg-tertiary flex items-center justify-center mb-4 ${f.iconColor}`}>
                   <Icon size={20} />
                 </div>
                 <h3 className="text-sm font-semibold text-text-primary mb-2">{f.title}</h3>
@@ -128,8 +131,11 @@ export default function HomePage() {
           {MODELS.map((m, i) => {
             const Icon = m.icon;
             return (
-              <div key={i} className="rounded-2xl bg-bg-secondary p-8 text-center hover:bg-bg-hover transition-all duration-200 group">
-                <div className={`w-14 h-14 rounded-2xl bg-bg-tertiary flex items-center justify-center mx-auto mb-5 ${m.color} group-hover:scale-110 transition-transform`}>
+              <div
+                key={i}
+                className="rounded-2xl bg-bg-secondary p-8 text-center hover:bg-bg-hover transition-all duration-300 ease-out hover:scale-[1.04] hover:shadow-lg hover:shadow-black/20 origin-center will-change-transform"
+              >
+                <div className={`w-14 h-14 rounded-2xl bg-bg-tertiary flex items-center justify-center mx-auto mb-5 ${m.color}`}>
                   <Icon size={26} />
                 </div>
                 <h3 className="text-base font-semibold text-text-primary mb-2">{m.name}</h3>
