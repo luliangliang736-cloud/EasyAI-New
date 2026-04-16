@@ -19,6 +19,24 @@ const MIN_TEXT_FONT = 10;
 const MAX_TEXT_FONT = 96;
 const MIN_SHAPE_PIXELS = 4;
 
+/** 缩放：1%–800%，指数曲线（Figma 风格） */
+const MIN_ZOOM_PCT = 1;
+const MAX_ZOOM_PCT = 800;
+/** deltaY 越大缩放越快；与 trackpad/滚轮配合 */
+const ZOOM_EXP_SENSITIVITY = 0.0018;
+
+/** 以屏幕点 (sx,sy) 为锚点应用新 zoom（世界坐标不变） */
+function applyZoomAtScreenPoint(cam, sx, sy, newZoomPct) {
+  const z = Math.min(MAX_ZOOM_PCT, Math.max(MIN_ZOOM_PCT, newZoomPct));
+  const oldS = cam.zoom / 100;
+  const newS = z / 100;
+  const wx = (sx - cam.x) / oldS;
+  const wy = (sy - cam.y) / oldS;
+  cam.x = sx - wx * newS;
+  cam.y = sy - wy * newS;
+  cam.zoom = z;
+}
+
 /** 世界坐标 AABB 相交（含贴边） */
 function worldRectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
   return !(ax + aw < bx || bx + bw < ax || ay + ah < by || by + bh < ay);
@@ -101,7 +119,8 @@ export default function Canvas({
 }) {
   const toast = useToast();
   const containerRef = useRef(null);
-  const [camera, setCamera] = useState({ x: 0, y: 0 });
+  /** 相机：同步可变对象（非 React state），平移/缩放后需 forceRender */
+  const cameraRef = useRef({ x: 0, y: 0, zoom: typeof zoom === "number" ? zoom : 100 });
   const [action, setAction] = useState(null);
   const actionRef = useRef(null);
   const [, forceRender] = useReducer((c) => c + 1, 0);
@@ -268,12 +287,48 @@ export default function Canvas({
     return () => window.removeEventListener("keydown", handleKey);
   }, [activeTool, selectedImage, selectedTextId, selectedShapeId, multiSelectedImageIds, multiSelectedTextIds, onDeleteImage, onDeleteText, onDeleteShape, onSelectImage]);
 
-  const handleWheel = useCallback((e) => {
-    e.preventDefault();
-    const step = e.ctrlKey ? 35 : 5;
-    const delta = e.deltaY > 0 ? -step : step;
-    onZoomChange?.((prev) => Math.max(1, Math.min(800, prev + delta)));
-  }, [onZoomChange]);
+  /** 工具栏：以视口中心为锚点缩放（线性步进保持与按钮一致） */
+  const handleToolbarZoomChange = useCallback(
+    (updater) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      const cam = cameraRef.current;
+      const prevZ = cam.zoom;
+      const nextZ =
+        typeof updater === "function" ? updater(prevZ) : updater;
+      if (rect) {
+        const cx = rect.width / 2;
+        const cy = rect.height / 2;
+        applyZoomAtScreenPoint(cam, cx, cy, nextZ);
+      } else {
+        cam.zoom = Math.min(MAX_ZOOM_PCT, Math.max(MIN_ZOOM_PCT, nextZ));
+      }
+      onZoomChange?.(cam.zoom);
+      forceRender();
+    },
+    [onZoomChange]
+  );
+
+  /** 滚轮：指数缩放 + 光标锚点（世界坐标不变） */
+  const handleWheel = useCallback(
+    (e) => {
+      e.preventDefault();
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const cam = cameraRef.current;
+      const oldS = cam.zoom / 100;
+      const sens = e.ctrlKey ? ZOOM_EXP_SENSITIVITY * 1.75 : ZOOM_EXP_SENSITIVITY;
+      const factor = Math.exp(-e.deltaY * sens);
+      const minS = MIN_ZOOM_PCT / 100;
+      const maxS = MAX_ZOOM_PCT / 100;
+      const newS = Math.min(maxS, Math.max(minS, oldS * factor));
+      applyZoomAtScreenPoint(cam, sx, sy, newS * 100);
+      onZoomChange?.(cam.zoom);
+      forceRender();
+    },
+    [onZoomChange]
+  );
 
   useEffect(() => {
     const el = containerRef.current;
@@ -409,7 +464,8 @@ export default function Canvas({
     if (target.closest?.("[data-text-editor]")) return;
 
     const imgEl = target.closest("[data-canvas-item]");
-    const scale = zoom / 100;
+    const cam = cameraRef.current;
+    const scale = cam.zoom / 100;
 
     if (isHandTool) {
       setAction("pan");
@@ -426,8 +482,8 @@ export default function Canvas({
       setMultiSelectedTextIds([]);
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const worldX = (e.clientX - rect.left - camera.x) / scale;
-      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      const worldX = (e.clientX - rect.left - cam.x) / scale;
+      const worldY = (e.clientY - rect.top - cam.y) / scale;
       setAction({
         type: "shape_draw",
         kind: shapeMode === "ellipse" ? "ellipse" : "rect",
@@ -520,8 +576,8 @@ export default function Canvas({
       setSelectedShapeId(null);
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const worldX = (e.clientX - rect.left - camera.x) / scale;
-      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      const worldX = (e.clientX - rect.left - cam.x) / scale;
+      const worldY = (e.clientY - rect.top - cam.y) / scale;
       const nid = `text-${Date.now()}`;
       // 同步写入父级文案列表，再进入编辑，否则首帧 textItems 尚未含 nid，无法立刻出现输入框
       flushSync(() => {
@@ -541,8 +597,8 @@ export default function Canvas({
       setMultiSelectedTextIds([]);
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const worldX = (e.clientX - rect.left - camera.x) / scale;
-      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      const worldX = (e.clientX - rect.left - cam.x) / scale;
+      const worldY = (e.clientY - rect.top - cam.y) / scale;
       setAction({
         type: "marquee",
         sx: worldX,
@@ -561,7 +617,6 @@ export default function Canvas({
     e.currentTarget.setPointerCapture(e.pointerId);
   }, [
     images, onSelectImage, isHandTool, isTextTool, isSelectTool, isShapeTool, onAddText,
-    camera, zoom,
     multiSelectedImageIds, multiSelectedTextIds, textItems,
     shapeItems, shapeMode,
   ]);
@@ -569,14 +624,17 @@ export default function Canvas({
   const handlePointerMove = useCallback((e) => {
     const act = actionRef.current;
     if (!act) return;
-    const scale = zoom / 100;
+    const cam = cameraRef.current;
+    const scale = cam.zoom / 100;
     if (act === "pan") {
-      setCamera((prev) => ({ x: prev.x + e.movementX, y: prev.y + e.movementY }));
+      cam.x += e.movementX;
+      cam.y += e.movementY;
+      forceRender();
     } else if (act.type === "shape_draw") {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const worldX = (e.clientX - rect.left - camera.x) / scale;
-      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      const worldX = (e.clientX - rect.left - cam.x) / scale;
+      const worldY = (e.clientY - rect.top - cam.y) / scale;
       setAction({ ...act, cx: worldX, cy: worldY });
     } else if (act.type === "shape_drag" && onUpdateShape) {
       const dx = (e.clientX - act.startX) / scale;
@@ -585,8 +643,8 @@ export default function Canvas({
     } else if (act.type === "marquee") {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const worldX = (e.clientX - rect.left - camera.x) / scale;
-      const worldY = (e.clientY - rect.top - camera.y) / scale;
+      const worldX = (e.clientX - rect.left - cam.x) / scale;
+      const worldY = (e.clientY - rect.top - cam.y) / scale;
       setAction({ ...act, cx: worldX, cy: worldY });
     } else if (act.type === "drag") {
       const dx = (e.clientX - act.startX) / scale;
@@ -620,7 +678,7 @@ export default function Canvas({
       const dy = (e.clientY - act.startY) / scale;
       onUpdateText(act.id, { x: act.origX + dx, y: act.origY + dy });
     }
-  }, [zoom, onUpdateText, onUpdateShape, camera]);
+  }, [onUpdateText, onUpdateShape]);
 
   const handlePointerUp = useCallback((e) => {
     const act = actionRef.current;
@@ -668,15 +726,17 @@ export default function Canvas({
         });
         const hitsTx = [];
         const crect = containerRef.current?.getBoundingClientRect();
+        const camMarquee = cameraRef.current;
+        const zf = camMarquee.zoom / 100;
         if (crect && containerRef.current) {
           containerRef.current.querySelectorAll("[data-text-item]").forEach((el) => {
             const id = el.dataset.textItem;
             if (!id) return;
             const r = el.getBoundingClientRect();
-            const left = (r.left - crect.left - camera.x) / (zoom / 100);
-            const top = (r.top - crect.top - camera.y) / (zoom / 100);
-            const tw = r.width / (zoom / 100);
-            const th = r.height / (zoom / 100);
+            const left = (r.left - crect.left - camMarquee.x) / zf;
+            const top = (r.top - crect.top - camMarquee.y) / zf;
+            const tw = r.width / zf;
+            const th = r.height / zf;
             if (worldRectsOverlap(left, top, tw, th, mx1, my1, mw, mh)) {
               hitsTx.push(id);
             }
@@ -725,7 +785,7 @@ export default function Canvas({
     }
     setAction(null);
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
-  }, [onUpdateImage, onSelectImage, onAddShape, onSyncCanvasRefImages, images, camera, zoom]);
+  }, [onUpdateImage, onSelectImage, onAddShape, onSyncCanvasRefImages, images]);
 
   const handleContextMenu = useCallback((e) => {
     e.preventDefault();
@@ -806,15 +866,17 @@ export default function Canvas({
     setFileDragOver(false);
     const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
     if (files.length > 0 && onDropImages) {
-      const scale = zoom / 100;
+      const cam = cameraRef.current;
+      const sc = cam.zoom / 100;
       const rect = containerRef.current?.getBoundingClientRect();
-      const dropX = rect ? (e.clientX - rect.left - camera.x) / scale : 100;
-      const dropY = rect ? (e.clientY - rect.top - camera.y) / scale : 100;
+      const dropX = rect ? (e.clientX - rect.left - cam.x) / sc : 100;
+      const dropY = rect ? (e.clientY - rect.top - cam.y) / sc : 100;
       onDropImages(files, dropX, dropY);
     }
-  }, [onDropImages, zoom, camera]);
+  }, [onDropImages]);
 
-  const scale = zoom / 100;
+  const cam = cameraRef.current;
+  const scale = cam.zoom / 100;
   const isPanning = action === "pan";
   const isDragging = action?.type === "drag";
   const isDraggingText = action?.type === "textdrag";
@@ -864,7 +926,7 @@ export default function Canvas({
       <div
         className="absolute inset-0 z-10"
         style={{
-          transform: `translate(${camera.x}px, ${camera.y}px) scale(${scale})`,
+          transform: `translate(${cam.x}px, ${cam.y}px) scale(${scale})`,
           transformOrigin: "0 0",
         }}
       >
@@ -1017,7 +1079,8 @@ export default function Canvas({
                           const startX = e.clientX;
                           const startW = pos.w;
                           const onMove = (ev) => {
-                            const dw = (ev.clientX - startX) / scale;
+                            const sc = cameraRef.current.zoom / 100;
+                            const dw = (ev.clientX - startX) / sc;
                             positionsRef.current[img.id] = { ...positionsRef.current[img.id], w: Math.max(120, startW + dw) };
                             forceRender();
                           };
@@ -1168,7 +1231,7 @@ export default function Canvas({
           activeTool={activeTool}
           onToolChange={onToolChange}
           zoom={zoom}
-          onZoomChange={onZoomChange}
+          onZoomChange={handleToolbarZoomChange}
           shapeMode={shapeMode}
           onShapeModeChange={onShapeModeChange}
         />
