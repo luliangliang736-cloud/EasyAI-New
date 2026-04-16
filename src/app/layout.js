@@ -16,6 +16,12 @@ export const metadata = {
   description: "AI-powered image generation tool",
 };
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
+
 export default function RootLayout({ children }) {
   return (
     <html lang="zh" className={`${geistSans.variable} ${geistMono.variable}`}>

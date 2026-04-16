@@ -41,14 +41,14 @@ function inferLoopCountFromPrompt(text) {
   if (!text || typeof text !== "string") return 0;
   const compact = text.replace(/\s/g, "");
   let best = 0;
-  const cnRe = /([0-9]{1,2}|[一二三四五六七八九十两]+)(套|张|款|组|幅|种|版|次|变)/g;
+  const cnRe = /([0-9]{1,2}|[一二三四五六七八九十两]+)\s*(个)?\s*(套|张|款|组|幅|种|版|次|变|方案|版本|结果|风格)/g;
   let m;
   while ((m = cnRe.exec(compact)) !== null) {
     const n = parseQuantityToken(m[1]);
     const capped = Math.min(n, MAX_GEN_COUNT);
     if (capped >= 1) best = Math.max(best, capped);
   }
-  const enRe = /\b([1-9])\s*(sets?|variants?|images?|pics?)\b/gi;
+  const enRe = /\b([1-9])\s*(sets?|variants?|images?|pics?|results?|versions?|options?)\b/gi;
   let m2;
   while ((m2 = enRe.exec(text)) !== null) {
     const n = parseInt(m2[1], 10);
@@ -57,7 +57,60 @@ function inferLoopCountFromPrompt(text) {
   return best;
 }
 
-const REQUEST_TIMEOUT_MS = 55000;
+const STYLE_VARIANTS = ["极简清爽", "街头潮流", "科技未来", "复古海报", "手作拼贴", "高级时装"];
+const MATERIAL_VARIANTS = ["纸张印刷肌理", "丝网印刷颗粒肌理", "蜡笔粉彩肌理", "塑料玩具质感", "绒面织物质感", "金属涂层质感"];
+const COLOR_VARIANTS = ["高明度糖果配色", "低饱和莫兰迪配色", "高对比撞色配色", "暖色主导配色", "冷色主导配色", "黑白点缀配色"];
+const LAYOUT_VARIANTS = ["居中主体构图", "偏左留白构图", "偏右留白构图", "近景特写构图", "中景平衡构图", "竖向海报构图"];
+const GENERAL_VARIANTS = ["方案A：简洁干净", "方案B：细节丰富", "方案C：高对比醒目", "方案D：更时尚现代", "方案E：更活泼有趣", "方案F：更高级克制"];
+
+function getVariantDescriptors(text, count) {
+  if (count <= 1) return [];
+  const compact = String(text || "").replace(/\s/g, "");
+  let pool = GENERAL_VARIANTS;
+  if (/材质|纹理|肌理|质感/.test(compact)) {
+    pool = MATERIAL_VARIANTS;
+  } else if (/配色|色系|颜色/.test(compact)) {
+    pool = COLOR_VARIANTS;
+  } else if (/构图|视角|机位|角度/.test(compact)) {
+    pool = LAYOUT_VARIANTS;
+  } else if (/风格/.test(compact)) {
+    pool = STYLE_VARIANTS;
+  } else if (/类型|版本|方案|结果/.test(compact)) {
+    pool = GENERAL_VARIANTS;
+  }
+
+  return Array.from({ length: count }, (_, index) => pool[index % pool.length]);
+}
+
+function buildSingleResultPrompt(text, count, index = 0, variantDescriptor = "") {
+  if (!text || count <= 1) return text;
+
+  const cleaned = text
+    .replace(/([给来做出整搞生成产出做成改成变成弄搞要请帮]*)\s*([0-9]{1,2}|[一二三四五六七八九十两]+)\s*(个)?\s*(套|张|款|组|幅|种|版|次|变|方案|版本|结果|风格)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  const basePrompt = cleaned || text;
+  return `${basePrompt}
+
+本次变体方向：${variantDescriptor || `第 ${index + 1} 个独立方案`}
+
+要求：
+1. 本次请求只生成 1 个独立结果，不要在同一张图里放入多组、多套、多款、多版本或并排重复内容。
+2. 这是第 ${index + 1} / ${count} 个结果，需要与其它结果保持明显差异，不要只是轻微改动。
+3. 如果用户原本表达的是两组、三套、多个方案，含义是生成多张彼此不同的独立图片，而不是把它们拼进同一画面。
+4. 单主体，单类型，单画面。no collage, no multiple subjects, no split layout, no duplicated objects.`;
+}
+
+function parseAspectRatio(imageSize) {
+  if (!imageSize || imageSize === "auto") return 1;
+  const [w, h] = String(imageSize).split(":").map(Number);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return 1;
+  return w / h;
+}
+
+const REQUEST_TIMEOUT_MS = 90000;
+const MAX_PARALLEL_GENERATIONS = 2;
 const STORAGE_VERSION = "9";
 const DEFAULT_CONVERSATION_TITLE = "新建对话";
 
@@ -191,6 +244,22 @@ async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
   }
 }
 
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
+
 const MODEL_LABELS = {
   "gemini-2.5-flash-image": "Nano Banana 1K",
   "gemini-2.5-flash-image-hd": "Nano Banana 1K HD",
@@ -231,6 +300,7 @@ function HomeInner() {
   const [activeConversationId, setActiveConversationId] = useState(initialConversationRef.current.id);
   const canvasHistory = useHistory([]);
   const canvasImages = canvasHistory.state;
+  const [canvasGeneratingItems, setCanvasGeneratingItems] = useState([]);
   const canvasTextsHistory = useHistory([]);
   const canvasTexts = canvasTextsHistory.state;
   const canvasShapesHistory = useHistory([]);
@@ -433,27 +503,31 @@ function HomeInner() {
     canvasSelectionUrlsRef.current = [];
   }, []);
 
-  const handleGenerate = useCallback(async () => {
-    const text = prompt.trim();
+  const handleGenerate = useCallback(async (retryPayload = null) => {
+    const sourceText = retryPayload?.text ?? prompt;
+    const text = String(sourceText || "").trim();
+    const effectiveParams = retryPayload?.params || params;
+    const effectiveRefImages = retryPayload?.refImages || refImages;
     if (!text || isGenerating || !activeConversationId) return;
 
     const ts = Date.now();
     const conversationId = activeConversationId;
     const userMsgId = "user-" + ts;
     const aiMsgId = "ai-" + ts;
-    const modelLabel = MODEL_LABELS[params.model] || params.model;
-    const hasImages = refImages.length > 0;
+    const modelLabel = MODEL_LABELS[effectiveParams.model] || effectiveParams.model;
+    const hasImages = effectiveRefImages.length > 0;
 
     const messageRefImages = hasImages
-      ? await Promise.all(refImages.map((img) => makeMessagePreviewImage(img)))
+      ? await Promise.all(effectiveRefImages.map((img) => makeMessagePreviewImage(img)))
       : [];
 
     const inferred = inferLoopCountFromPrompt(text);
     const count = Math.min(
-      Math.max(Math.max(params.num || 1, inferred), 1),
+      Math.max(Math.max(effectiveParams.num || 1, inferred), 1),
       MAX_GEN_COUNT
     );
-    const genParams = { ...params, num: count };
+    const variantDescriptors = getVariantDescriptors(text, count);
+    const genParams = { ...effectiveParams, num: count };
 
     const userMsg = {
       id: userMsgId,
@@ -473,7 +547,7 @@ function HomeInner() {
     const aiMsg = {
       id: aiMsgId,
       role: "assistant",
-      text: "",
+      text,
       params: genParams,
       modelLabel,
       status: "generating",
@@ -496,7 +570,7 @@ function HomeInner() {
         cancelled: false,
       };
       const preparedImages = await Promise.all(
-        refImages.map((img) => {
+        effectiveRefImages.map((img) => {
           if (typeof img !== "string") {
             return img;
           }
@@ -511,118 +585,174 @@ function HomeInner() {
       );
 
       const imageSize =
-        params.image_size === "auto"
-          ? (params._autoRatio || "1:1")
-          : params.image_size;
+        effectiveParams.image_size === "auto"
+          ? (effectiveParams._autoRatio || "1:1")
+          : effectiveParams.image_size;
+      const placeholderAspectRatio = parseAspectRatio(imageSize);
       const imagePayload =
         preparedImages.length === 1 ? preparedImages[0] : preparedImages;
 
-      let successCount = 0;
+      setCanvasGeneratingItems((prev) => [
+        ...prev,
+        ...tasks.map((task) => ({
+          id: `${aiMsgId}-${task.id}`,
+          aiMsgId,
+          taskId: task.id,
+          slotIndex: task.index,
+          totalCount: count,
+          prompt: text,
+          isGeneratingPlaceholder: true,
+          generationStatus: "pending",
+          placeholderAspectRatio,
+        })),
+      ]);
 
-      for (let i = 0; i < count; i++) {
-        if (
-          activeGenerationRef.current?.conversationId !== conversationId ||
-          activeGenerationRef.current?.aiMsgId !== aiMsgId ||
-          activeGenerationRef.current?.cancelled
-        ) {
-          break;
-        }
-
-        const taskId = tasks[i].id;
-        patchTask(conversationId, aiMsgId, taskId, { status: "generating" });
-
-        try {
-          let res;
-          if (hasImages) {
-            res = await fetchWithTimeout("/api/edit", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              signal: requestController.signal,
-              body: JSON.stringify({
-                prompt: text,
-                image: imagePayload,
-                model: params.model,
-                image_size: imageSize,
-                num: 1,
-              }),
-            });
-          } else {
-            res = await fetchWithTimeout("/api/generate", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              signal: requestController.signal,
-              body: JSON.stringify({
-                prompt: text,
-                model: params.model,
-                image_size: imageSize,
-                num: 1,
-              }),
-            });
-          }
-
-          const data = await parseApiResponse(res);
+      const taskResults = await runWithConcurrency(
+        tasks,
+        Math.min(MAX_PARALLEL_GENERATIONS, count),
+        async (task) => {
           if (
             activeGenerationRef.current?.conversationId !== conversationId ||
             activeGenerationRef.current?.aiMsgId !== aiMsgId ||
             activeGenerationRef.current?.cancelled
           ) {
-            break;
+            return { status: "cancelled" };
           }
 
-          if (!res.ok || data.error) {
-            patchTask(conversationId, aiMsgId, taskId, {
-              status: "failed",
-              error: errStr(data.error || `请求失败（${res.status}）`),
-            });
-            continue;
-          }
+          const taskId = task.id;
+          const canvasItemId = `${aiMsgId}-${taskId}`;
+          const requestPrompt = buildSingleResultPrompt(
+            text,
+            count,
+            task.index,
+            variantDescriptors[task.index] || ""
+          );
+          patchTask(conversationId, aiMsgId, taskId, { status: "generating" });
+          setCanvasGeneratingItems((prev) =>
+            prev.map((item) =>
+              item.id === canvasItemId
+                ? { ...item, generationStatus: "generating" }
+                : item
+            )
+          );
 
-          const urls = data.data?.urls || [];
-          const url = urls[0];
-          if (!url) {
-            patchTask(conversationId, aiMsgId, taskId, {
-              status: "failed",
-              error: "未返回图片",
-            });
-            continue;
-          }
-
-          patchTask(conversationId, aiMsgId, taskId, {
-            status: "completed",
-            url,
-            error: null,
-          });
-          successCount += 1;
-          canvasHistory.push((prev) => [
-            ...prev,
-            {
-              id: `${aiMsgId}-${taskId}`,
-              image_url: url,
-              prompt: text,
-            },
-          ]);
-        } catch (err) {
-          if (
-            activeGenerationRef.current?.conversationId !== conversationId ||
-            activeGenerationRef.current?.aiMsgId !== aiMsgId
-          ) {
-            break;
-          }
-          if (err?.name === "AbortError") {
-            if (!activeGenerationRef.current?.cancelled) {
-              patchTask(conversationId, aiMsgId, taskId, {
-                status: "failed",
-                error: "请求超时。可尝试更小尺寸模型或稍后重试。",
+          try {
+            let res;
+            if (hasImages) {
+              res = await fetchWithTimeout("/api/edit", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                signal: requestController.signal,
+                body: JSON.stringify({
+                  prompt: requestPrompt,
+                  image: imagePayload,
+                  model: effectiveParams.model,
+                  image_size: imageSize,
+                  num: 1,
+                }),
+              });
+            } else {
+              res = await fetchWithTimeout("/api/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                signal: requestController.signal,
+                body: JSON.stringify({
+                  prompt: requestPrompt,
+                  model: effectiveParams.model,
+                  image_size: imageSize,
+                  num: 1,
+                }),
               });
             }
-            break;
+
+            const data = await parseApiResponse(res);
+            if (
+              activeGenerationRef.current?.conversationId !== conversationId ||
+              activeGenerationRef.current?.aiMsgId !== aiMsgId ||
+              activeGenerationRef.current?.cancelled
+            ) {
+              return { status: "cancelled" };
+            }
+
+            if (!res.ok || data.error) {
+              patchTask(conversationId, aiMsgId, taskId, {
+                status: "failed",
+                error: errStr(data.error || `请求失败（${res.status}）`),
+              });
+              setCanvasGeneratingItems((prev) =>
+                prev.filter((item) => item.id !== canvasItemId)
+              );
+              return { status: "failed" };
+            }
+
+            const urls = data.data?.urls || [];
+            const url = urls[0];
+            if (!url) {
+              patchTask(conversationId, aiMsgId, taskId, {
+                status: "failed",
+                error: "未返回图片",
+              });
+              setCanvasGeneratingItems((prev) =>
+                prev.filter((item) => item.id !== canvasItemId)
+              );
+              return { status: "failed" };
+            }
+
+            patchTask(conversationId, aiMsgId, taskId, {
+              status: "completed",
+              url,
+              error: null,
+            });
+            setCanvasGeneratingItems((prev) =>
+              prev.filter((item) => item.id !== canvasItemId)
+            );
+            canvasHistory.push((prev) => [
+              ...prev,
+              {
+                id: canvasItemId,
+                image_url: url,
+                prompt: text,
+              },
+            ]);
+            return { status: "completed" };
+          } catch (err) {
+            if (
+              activeGenerationRef.current?.conversationId !== conversationId ||
+              activeGenerationRef.current?.aiMsgId !== aiMsgId
+            ) {
+              return { status: "cancelled" };
+            }
+            if (err?.name === "AbortError") {
+              if (!activeGenerationRef.current?.cancelled) {
+                patchTask(conversationId, aiMsgId, taskId, {
+                  status: "failed",
+                  error: "请求超时。可稍后重试，或减少张数以降低排队压力。",
+                });
+                setCanvasGeneratingItems((prev) =>
+                  prev.filter((item) => item.id !== canvasItemId)
+                );
+                return { status: "failed" };
+              }
+              setCanvasGeneratingItems((prev) =>
+                prev.filter((item) => item.id !== canvasItemId)
+              );
+              return { status: "cancelled" };
+            }
+            patchTask(conversationId, aiMsgId, taskId, {
+              status: "failed",
+              error: errStr(err),
+            });
+            setCanvasGeneratingItems((prev) =>
+              prev.filter((item) => item.id !== canvasItemId)
+            );
+            return { status: "failed" };
           }
-          patchTask(conversationId, aiMsgId, taskId, {
-            status: "failed",
-            error: errStr(err),
-          });
         }
-      }
+      );
+
+      const successCount = taskResults.reduce((acc, result) => (
+        result?.status === "completed" ? acc + 1 : acc
+      ), 0);
 
       if (
         activeGenerationRef.current?.conversationId === conversationId &&
@@ -671,6 +801,9 @@ function HomeInner() {
         })
       );
     } finally {
+      setCanvasGeneratingItems((prev) =>
+        prev.filter((item) => item.aiMsgId !== aiMsgId)
+      );
       if (
         activeGenerationRef.current?.conversationId === conversationId &&
         activeGenerationRef.current?.aiMsgId === aiMsgId
@@ -722,6 +855,9 @@ function HomeInner() {
       })
     );
     setIsGenerating(false);
+    setCanvasGeneratingItems((prev) =>
+      prev.filter((item) => item.aiMsgId !== aiMsgId)
+    );
     generationAbortRef.current = null;
     controller.abort();
     toast("已暂停当前生成", "info", 1500);
@@ -747,16 +883,18 @@ function HomeInner() {
 
   const handleSelectImage = useCallback((img) => {
     if (!img?.image_url) {
+      const toRemove = [...canvasSelectionUrlsRef.current];
+      canvasSelectionUrlsRef.current = [];
       setSelectedImage(null);
       setRefImages((prev) =>
-        prev.filter((u) => !canvasSelectionUrlsRef.current.includes(u))
+        prev.filter((u) => !toRemove.includes(u))
       );
-      canvasSelectionUrlsRef.current = [];
       return;
     }
+    const prevCanvasUrls = [...canvasSelectionUrlsRef.current];
+    canvasSelectionUrlsRef.current = [img.image_url];
     setRefImages((prev) => {
-      const withoutCanvas = prev.filter((u) => !canvasSelectionUrlsRef.current.includes(u));
-      canvasSelectionUrlsRef.current = [img.image_url];
+      const withoutCanvas = prev.filter((u) => !prevCanvasUrls.includes(u));
       const seen = new Set(withoutCanvas);
       if (!seen.has(img.image_url)) {
         return [...withoutCanvas, img.image_url];
@@ -771,9 +909,10 @@ function HomeInner() {
   const handleSyncCanvasRefImages = useCallback((urls) => {
     const list = (urls || []).filter(Boolean);
     if (list.length < 2) return;
+    const prevCanvasUrls = [...canvasSelectionUrlsRef.current];
+    canvasSelectionUrlsRef.current = [...list];
     setRefImages((prev) => {
-      const withoutCanvas = prev.filter((u) => !canvasSelectionUrlsRef.current.includes(u));
-      canvasSelectionUrlsRef.current = [...list];
+      const withoutCanvas = prev.filter((u) => !prevCanvasUrls.includes(u));
       const merged = [...withoutCanvas];
       for (const u of list) {
         if (merged.length >= MAX_REF_IMAGES) break;
@@ -803,6 +942,17 @@ function HomeInner() {
     toast(`已添加 ${files.length} 张图片到画布`, "success");
   }, [canvasHistory, toast]);
 
+  const handleDropGeneratedImage = useCallback((item, dropX, dropY) => {
+    if (!item?.url) return;
+    const newImg = {
+      id: `chat-drop-${Date.now()}`,
+      image_url: item.url,
+      prompt: item.prompt || "拖入图片",
+    };
+    canvasHistory.push((prev) => [...prev, newImg]);
+    toast("已添加到画布", "success", 1200);
+  }, [canvasHistory, toast]);
+
   /** 画布内复制后粘贴（Ctrl/Cmd+V），或与系统剪贴板图片合并 */
   const handlePasteCanvasImages = useCallback(
     (items) => {
@@ -822,9 +972,23 @@ function HomeInner() {
   );
 
   const handleRetry = useCallback((msg) => {
-    setPrompt(msg.text);
-    if (msg.params) setParamsClamped(msg.params);
-  }, [setParamsClamped]);
+    const messageIndex = messages.findIndex((item) => item.id === msg.id);
+    const previousUserMessage = messageIndex >= 0
+      ? [...messages.slice(0, messageIndex)].reverse().find((item) => item.role === "user")
+      : null;
+    const retryText = msg.text?.trim() || previousUserMessage?.text?.trim() || "";
+    const retryParams = msg.params || previousUserMessage?.params || params;
+    const retryRefImages = previousUserMessage?.refImages || [];
+
+    if (!retryText) {
+      toast("未找到可重试的提示词", "info", 1500);
+      return;
+    }
+
+    setPrompt(retryText);
+    setParamsClamped(retryParams);
+    setRefImages(retryRefImages);
+  }, [messages, params, setParamsClamped, toast]);
 
   const handleDownload = useCallback(async (msg) => {
     const url = msg.image_url;
@@ -955,12 +1119,14 @@ function HomeInner() {
       <Canvas
         ref={canvasRef}
         images={canvasImages}
+        generatingItems={canvasGeneratingItems}
         selectedImage={selectedImage}
         onSelectImage={handleSelectImage}
         onDeleteImage={handleDeleteImage}
         onUpdateImage={handleUpdateImage}
         onSendToChat={handleSendToChat}
         onDropImages={handleDropImages}
+        onDropGeneratedImage={handleDropGeneratedImage}
         onPasteImages={handlePasteCanvasImages}
         activeTool={activeTool}
         onToolChange={setActiveTool}

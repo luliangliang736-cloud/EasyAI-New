@@ -26,6 +26,8 @@ import {
 import { compressImage } from "@/lib/imageUtils";
 import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
+const CANVAS_IMAGE_MIME = "application/x-easy-ai-canvas-image";
+
 const MODEL_TIERS = [
   {
     id: "flash",
@@ -145,6 +147,17 @@ function ImageLightbox({ src, onClose }) {
 }
 
 function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, onPauseGenerate, onDelete }) {
+  const handleGeneratedImageDragStart = useCallback((e, url, index) => {
+    const payload = {
+      url,
+      prompt: message.text || `生成结果 ${index + 1}`,
+    };
+    e.dataTransfer.effectAllowed = "copy";
+    e.dataTransfer.setData(CANVAS_IMAGE_MIME, JSON.stringify(payload));
+    e.dataTransfer.setData("text/uri-list", url);
+    e.dataTransfer.setData("text/plain", url);
+  }, [message.text]);
+
   if (message.role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
@@ -301,7 +314,13 @@ function MessageBubble({ message, onRetry, onDownload, onImageClick, onPreview, 
           <div className="space-y-2">
             {message.urls.map((url, i) => (
               <div key={i} className="bg-bg-tertiary border border-border-primary rounded-2xl rounded-tl-md overflow-hidden">
-                <div className="relative block w-full cursor-pointer" onClick={() => onPreview?.(url)}>
+                <div
+                  className="relative block w-full cursor-grab active:cursor-grabbing"
+                  draggable
+                  onDragStart={(e) => handleGeneratedImageDragStart(e, url, i)}
+                  onClick={() => onPreview?.(url)}
+                  title="可直接拖入左侧画布"
+                >
                   <img src={url} alt={message.text} className="w-full hover:opacity-95 transition-opacity" />
                 </div>
                 <div className="px-3 py-2 flex items-center justify-between">

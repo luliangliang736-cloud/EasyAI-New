@@ -18,6 +18,7 @@ const DEFAULT_TEXT_FONT = 16;
 const MIN_TEXT_FONT = 10;
 const MAX_TEXT_FONT = 96;
 const MIN_SHAPE_PIXELS = 4;
+const CANVAS_IMAGE_MIME = "application/x-easy-ai-canvas-image";
 
 /** 缩放：1%–800%，指数曲线（Figma 风格） */
 const MIN_ZOOM_PCT = 1;
@@ -112,9 +113,10 @@ function ContextMenu({ x, y, img, isLocked, onClose, onAction }) {
 
 export default function Canvas({
   images, selectedImage, onSelectImage, onDeleteImage,
-  onUpdateImage, onSendToChat, onDropImages, onPasteImages,
+  onUpdateImage, onSendToChat, onDropImages, onDropGeneratedImage, onPasteImages,
   activeTool, onToolChange, zoom, onZoomChange,
   ref,
+  generatingItems = [],
   textItems = [],
   onAddText,
   onUpdateText,
@@ -153,17 +155,41 @@ export default function Canvas({
 
   actionRef.current = action;
 
+  const renderImages = [
+    ...images,
+    ...generatingItems.filter((item) => !images.some((img) => img.id === item.id)),
+  ];
+
   const positionsRef = useRef({});
   const imageMetaRef = useRef({});
-  images.forEach((img, i) => {
+  renderImages.forEach((img, i) => {
     if (!positionsRef.current[img.id]) {
-      const col = i % 4;
-      const row = Math.floor(i / 4);
-      positionsRef.current[img.id] = {
-        x: col * (INITIAL_IMG_WIDTH + 40) + 100,
-        y: row * (INITIAL_IMG_WIDTH + 60) + 100,
-        w: INITIAL_IMG_WIDTH,
-      };
+      if (img.isGeneratingPlaceholder) {
+        const gapX = 40;
+        const gapY = 50;
+        const cols = Math.min(2, Math.max(1, img.totalCount || 2));
+        const slotIndex = img.slotIndex || 0;
+        const maxImageBottom = images.reduce((acc, image) => {
+          const p = positionsRef.current[image.id];
+          if (!p) return acc;
+          const meta = imageMetaRef.current[image.id];
+          const h = meta ? (p.w * meta.height) / meta.width : p.w;
+          return Math.max(acc, p.y + h);
+        }, 80);
+        positionsRef.current[img.id] = {
+          x: 100 + (slotIndex % cols) * (INITIAL_IMG_WIDTH + gapX),
+          y: maxImageBottom + 60 + Math.floor(slotIndex / cols) * (INITIAL_IMG_WIDTH + gapY),
+          w: INITIAL_IMG_WIDTH,
+        };
+      } else {
+        const col = i % 4;
+        const row = Math.floor(i / 4);
+        positionsRef.current[img.id] = {
+          x: col * (INITIAL_IMG_WIDTH + 40) + 100,
+          y: row * (INITIAL_IMG_WIDTH + 60) + 100,
+          w: INITIAL_IMG_WIDTH,
+        };
+      }
     }
   });
 
@@ -481,10 +507,16 @@ export default function Canvas({
       if (tag === "INPUT" || tag === "TEXTAREA") return true;
       return Boolean(el.isContentEditable);
     };
+    const hasTextSelection = () => {
+      const sel = window.getSelection?.();
+      if (!sel) return false;
+      return !sel.isCollapsed && sel.toString().trim().length > 0;
+    };
     const onKeyDown = (e) => {
       if (typing()) return;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "c") {
+        if (hasTextSelection()) return;
         const ids =
           multiSelectedImageIds.length > 0
             ? multiSelectedImageIds
@@ -876,6 +908,7 @@ export default function Canvas({
       const mw = mx2 - mx1;
       const mh = my2 - my1;
       if (mw < 1 && mh < 1) {
+        onSelectImage?.(null);
         setMultiSelectedImageIds([]);
         setMultiSelectedTextIds([]);
         setSelectedShapeId(null);
@@ -911,6 +944,9 @@ export default function Canvas({
         }
         setMultiSelectedImageIds(hitsImg);
         setMultiSelectedTextIds(hitsTx);
+        if (hitsImg.length === 0) {
+          onSelectImage?.(null);
+        }
         if (hitsImg.length >= 2) {
           const urls = hitsImg
             .map((id) => images.find((im) => im.id === id)?.image_url)
@@ -1018,7 +1054,12 @@ export default function Canvas({
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.dataTransfer.types.includes("Files")) setFileDragOver(true);
+    if (
+      e.dataTransfer.types.includes("Files") ||
+      e.dataTransfer.types.includes(CANVAS_IMAGE_MIME)
+    ) {
+      setFileDragOver(true);
+    }
   }, []);
 
   const handleDragLeave = useCallback((e) => {
@@ -1031,16 +1072,28 @@ export default function Canvas({
     e.preventDefault();
     e.stopPropagation();
     setFileDragOver(false);
+    const cam = cameraRef.current;
+    const sc = cam.zoom / 100;
+    const rect = containerRef.current?.getBoundingClientRect();
+    const dropX = rect ? (e.clientX - rect.left - cam.x) / sc : 100;
+    const dropY = rect ? (e.clientY - rect.top - cam.y) / sc : 100;
+    const draggedCanvasImage = e.dataTransfer.getData(CANVAS_IMAGE_MIME);
+    if (draggedCanvasImage && onDropGeneratedImage) {
+      try {
+        const payload = JSON.parse(draggedCanvasImage);
+        if (payload?.url) {
+          onDropGeneratedImage(payload, dropX, dropY);
+          return;
+        }
+      } catch {
+        /* ignore invalid drag payload */
+      }
+    }
     const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
     if (files.length > 0 && onDropImages) {
-      const cam = cameraRef.current;
-      const sc = cam.zoom / 100;
-      const rect = containerRef.current?.getBoundingClientRect();
-      const dropX = rect ? (e.clientX - rect.left - cam.x) / sc : 100;
-      const dropY = rect ? (e.clientY - rect.top - cam.y) / sc : 100;
       onDropImages(files, dropX, dropY);
     }
-  }, [onDropImages]);
+  }, [onDropGeneratedImage, onDropImages]);
 
   const cam = cameraRef.current;
   const scale = cam.zoom / 100;
@@ -1101,7 +1154,7 @@ export default function Canvas({
           transformOrigin: "0 0",
         }}
       >
-        {images.length === 0 && textItems.length === 0 && shapeItems.length === 0 && !fileDragOver && (
+        {renderImages.length === 0 && textItems.length === 0 && shapeItems.length === 0 && !fileDragOver && (
           <div
             className="pointer-events-none absolute flex flex-col items-center justify-center text-center"
             style={{ left: "50%", top: "50%", transform: `translate(-50%, -50%) scale(${1 / scale})`, width: 300 }}
@@ -1148,9 +1201,46 @@ export default function Canvas({
           );
         })()}
 
-        {images.map((img) => {
+        {renderImages.map((img) => {
           const pos = positionsRef.current[img.id];
           if (!pos) return null;
+          if (img.isGeneratingPlaceholder) {
+            const placeholderRatio = img.placeholderAspectRatio || 1;
+            const placeholderHeight = Math.max(160, Math.round(pos.w / placeholderRatio));
+            const isRunning = img.generationStatus === "generating";
+            return (
+              <div
+                key={img.id}
+                data-canvas-item={img.id}
+                className="absolute group cursor-move"
+                style={{ left: pos.x, top: pos.y, width: pos.w }}
+              >
+                <div
+                  className="rounded-xl overflow-hidden border border-border-primary bg-bg-secondary/80 hover:border-border-secondary transition-colors"
+                  style={{ height: placeholderHeight }}
+                >
+                  <div
+                    className="w-full h-full flex flex-col items-center justify-center gap-3"
+                    style={{
+                      background: "linear-gradient(90deg, #161616 25%, #242424 50%, #161616 75%)",
+                      backgroundSize: "200% 100%",
+                      animation: "shimmer 1.5s infinite",
+                    }}
+                  >
+                    <div className={`w-8 h-8 rounded-full border-2 border-accent/30 border-t-accent ${isRunning ? "animate-spin" : ""}`} />
+                    <div className="text-center">
+                      <p className="text-xs text-text-primary font-medium">
+                        {isRunning ? "生成中" : "等待中"}
+                      </p>
+                      <p className="text-[10px] text-text-tertiary mt-1">
+                        {img.prompt || "正在准备生成"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          }
           const isHighlighted =
             selectedImage?.id === img.id || multiSelectedImageIds.includes(img.id);
           const isChromeSingle =
