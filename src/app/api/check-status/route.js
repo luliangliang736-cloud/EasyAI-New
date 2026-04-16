@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+export const maxDuration = 30;
+
 const API_BASE = process.env.NANO_API_BASE || "https://gateway.bananapro.site";
 const API_KEY = process.env.NANO_API_KEY;
 

@@ -1,2 +1,10 @@
 [build]
   command = "npm run build"
+
+[functions]
+  external_node_modules = ["@imgly/background-removal-node"]
+
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"

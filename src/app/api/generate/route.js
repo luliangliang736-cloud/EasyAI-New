@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
+export const maxDuration = 60;
+
 const API_BASE = process.env.NANO_API_BASE || "https://api.nanobananaapi.dev";
 const API_KEY = process.env.NANO_API_KEY;
 
