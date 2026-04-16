@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { removeBackground } from "@imgly/background-removal-node";
 import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
 const API_BASE = process.env.NANO_API_BASE || "https://api.nanobananaapi.dev";
@@ -31,6 +30,7 @@ async function normalizeCutoutSource(image) {
 
 async function runTrueCutout(image) {
   const input = await normalizeCutoutSource(image);
+  const { removeBackground } = await import("@imgly/background-removal-node");
   const blob = await removeBackground(input, {
     model: "small",
     output: {
