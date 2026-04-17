@@ -27,13 +27,24 @@ const MODELS = [
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
+  const [navVisible, setNavVisible] = useState(false);
   const { theme, toggleTheme } = useTheme("dark");
   useEffect(() => setMounted(true), []);
 
   return (
     <div className="min-h-screen bg-bg-primary overflow-x-hidden overflow-y-auto">
+      <div
+        className="fixed top-0 left-0 right-0 z-40 h-6"
+        onMouseEnter={() => setNavVisible(true)}
+      />
       {/* Nav */}
-      <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 lg:px-12 py-4 bg-bg-primary/70 backdrop-blur-xl border-b border-border-primary/60">
+      <nav
+        className={`fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 lg:px-12 py-4 bg-bg-primary/70 backdrop-blur-xl border-b border-border-primary/60 transition-all duration-200 ${
+          navVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-full pointer-events-none"
+        }`}
+        onMouseEnter={() => setNavVisible(true)}
+        onMouseLeave={() => setNavVisible(false)}
+      >
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-accent flex items-center justify-center">
             <BrandLogo className="w-5 h-5 text-white" />
@@ -61,17 +72,17 @@ export default function HomePage() {
       {/* Hero with video */}
       <section className="relative w-full h-screen min-h-[600px] overflow-hidden">
         <video
-          autoPlay muted loop playsInline
+          autoPlay
+          muted
+          loop
+          playsInline
+          preload="auto"
           className="absolute inset-0 w-full h-full object-cover"
           src="/videos/hero.mp4"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-bg-primary via-bg-primary/55 to-bg-primary/20" />
+        <div className="absolute inset-0 bg-gradient-to-t from-bg-primary/80 via-bg-primary/44 to-bg-primary/16" />
 
         <div className={`absolute inset-0 flex flex-col items-center justify-end pb-24 lg:pb-32 px-6 text-center transition-all duration-700 ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"}`}>
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-bg-secondary/70 backdrop-blur-md text-text-secondary text-xs font-medium mb-6 border border-border-primary/60">
-            <Sparkles size={12} />
-            AI 驱动的创意设计工具
-          </div>
           <h1 className="text-4xl lg:text-6xl font-bold text-text-primary leading-tight tracking-tight mb-5">
             用 <span style={{ color: "#3FCA58" }}>AI</span> 释放
             <br />你的创意想象力
