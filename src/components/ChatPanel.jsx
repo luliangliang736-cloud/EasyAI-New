@@ -390,6 +390,7 @@ export default function ChatPanel({
   showTextEditPanelInline = true,
   onRetry, onDownload, onImageClick,
   onPauseGenerate,
+  entryMode = "agent", onEntryModeChange,
   composerMode = "agent", onComposerModeChange,
   theme, onToggleTheme,
   width, onWidthChange,
@@ -397,9 +398,11 @@ export default function ChatPanel({
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const conversationMenuRef = useRef(null);
+  const entryModeMenuRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [previewSrc, setPreviewSrc] = useState(null);
   const [showConversationMenu, setShowConversationMenu] = useState(false);
+  const [showEntryModeMenu, setShowEntryModeMenu] = useState(false);
   const [conversationSearch, setConversationSearch] = useState("");
 
   useEffect(() => {
@@ -407,7 +410,7 @@ export default function ChatPanel({
   }, [messages]);
 
   useEffect(() => {
-    if (!showConversationMenu) {
+    if (!showConversationMenu && !showEntryModeMenu) {
       return undefined;
     }
 
@@ -415,16 +418,22 @@ export default function ChatPanel({
       if (!conversationMenuRef.current?.contains(event.target)) {
         setShowConversationMenu(false);
       }
+      if (!entryModeMenuRef.current?.contains(event.target)) {
+        setShowEntryModeMenu(false);
+      }
     };
 
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [showConversationMenu]);
+  }, [showConversationMenu, showEntryModeMenu]);
 
   const currentTier = MODEL_TIERS.find((t) => t.variants.some((v) => v.model === params.model)) || MODEL_TIERS[1];
   const availableRatios = currentTier.extendedRatios ? [...STANDARD_RATIOS, ...EXTENDED_RATIOS] : STANDARD_RATIOS;
   const maxImages = currentTier.maxInputImages;
   const currentServiceTier = params.service_tier === "default" ? "default" : "priority";
+  const currentEntryMode = entryMode === "quick" ? "quick" : "agent";
+  const currentEntryModeLabel = currentEntryMode === "quick" ? "一键生图" : "Agent";
+  const isQuickEntryMode = currentEntryMode === "quick";
   const filteredConversations = conversations
     .filter((conversation) => {
       const query = conversationSearch.trim().toLowerCase();
@@ -603,136 +612,149 @@ export default function ChatPanel({
       <div className="flex-1 bg-bg-secondary border-l border-border-primary flex flex-col h-full min-w-0">
         {/* Header */}
         <div className="h-12 px-4 flex items-center justify-between border-b border-border-primary flex-shrink-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center">
               <BrandLogo className="w-3.5 h-3.5 text-white" />
             </div>
-            <span className="text-sm font-medium text-text-primary">Agent</span>
-          </div>
-          {onToggleTheme && (
-            <button
-              onClick={onToggleTheme}
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
-              title={theme === "dark" ? "切换到浅色" : "切换到深色"}
-            >
-              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-          )}
-        </div>
-
-        <div className="px-3 pt-3 pb-2 flex-shrink-0">
-          <div className="relative" ref={conversationMenuRef}>
-            <div className="flex items-center gap-2">
+            <div className="relative" ref={entryModeMenuRef}>
               <button
                 type="button"
-                onClick={() => setShowConversationMenu((prev) => !prev)}
-                className="flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-primary hover:bg-bg-hover transition-all text-left"
+                onClick={() => setShowEntryModeMenu((prev) => !prev)}
+                className="flex items-center gap-1.5 px-1 py-1 text-text-primary hover:text-accent transition-all"
               >
-                <div className="w-8 h-8 rounded-xl bg-accent/15 border border-accent/20 text-accent flex items-center justify-center flex-shrink-0">
-                  <MessageSquareText size={14} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[10px] text-text-tertiary">当前对话</p>
-                  <p className="text-sm text-text-primary truncate">
-                    {activeConversation?.title || "新建对话"}
-                  </p>
-                </div>
-                <ChevronDown size={15} className={`text-text-tertiary transition-transform ${showConversationMenu ? "rotate-180" : ""}`} />
+                <span className="text-sm font-medium">{currentEntryModeLabel}</span>
+                <ChevronDown size={14} className={`text-text-tertiary transition-transform ${showEntryModeMenu ? "rotate-180" : ""}`} />
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowConversationMenu(false);
-                  onNewConversation?.();
-                }}
-                className="h-10 px-3 rounded-xl bg-bg-tertiary border border-border-primary text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all flex items-center gap-1.5"
-                title="新建对话"
-              >
-                <Plus size={15} />
-                <span className="text-xs font-medium">新建对话</span>
-              </button>
-            </div>
-
-            {showConversationMenu && (
-              <div className="absolute left-0 right-0 top-[calc(100%+8px)] rounded-2xl border border-border-primary bg-bg-secondary/95 backdrop-blur-xl shadow-2xl p-3 space-y-3 z-30 animate-fade-in">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-text-primary">历史对话</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowConversationMenu(false);
-                      onNewConversation?.();
-                    }}
-                    className="h-9 px-3 rounded-xl bg-accent text-white hover:bg-accent-hover transition-all flex items-center gap-1.5 text-xs font-medium"
-                  >
-                    <Plus size={14} />
-                    新建对话
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-primary">
-                  <Search size={14} className="text-text-tertiary flex-shrink-0" />
-                  <input
-                    type="text"
-                    value={conversationSearch}
-                    onChange={(e) => setConversationSearch(e.target.value)}
-                    placeholder="请输入搜索关键词"
-                    className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-tertiary outline-none"
-                  />
-                </div>
-
-                <div className="max-h-64 overflow-y-auto space-y-1.5 scrollbar-thin pr-1">
-                  {filteredConversations.length === 0 && (
-                    <div className="px-3 py-6 text-center text-sm text-text-tertiary">
-                      没有匹配的历史对话
-                    </div>
-                  )}
-                  {filteredConversations.map((conversation) => {
-                    const isActive = conversation.id === activeConversationId;
-                    const lastMessage = [...(conversation.messages || [])].reverse().find((message) => message.text?.trim());
+              {showEntryModeMenu && (
+                <div className="absolute left-0 top-[calc(100%+8px)] min-w-[132px] rounded-2xl border border-border-primary bg-bg-secondary/95 backdrop-blur-xl shadow-2xl p-1.5 z-30 animate-fade-in">
+                  {[
+                    { id: "agent", label: "Agent", desc: "适合有设计基础" },
+                    { id: "quick", label: "一键生图", desc: "适合非设计人员" },
+                  ].map((mode) => {
+                    const active = currentEntryMode === mode.id;
                     return (
                       <button
-                        key={conversation.id}
+                        key={mode.id}
                         type="button"
                         onClick={() => {
-                          setShowConversationMenu(false);
-                          onSelectConversation?.(conversation.id);
+                          onEntryModeChange?.(mode.id);
+                          setShowEntryModeMenu(false);
                         }}
-                        className={`w-full text-left px-3 py-2.5 rounded-xl transition-all border ${
-                          isActive
-                            ? "bg-accent/10 border-accent/30"
-                            : "bg-bg-tertiary border-border-primary hover:bg-bg-hover"
+                        className={`w-full text-left px-3 py-2 rounded-xl transition-all ${
+                          active ? "bg-accent/10 text-text-primary" : "text-text-secondary hover:bg-bg-hover"
                         }`}
                       >
-                        <div className="flex items-start gap-2">
-                          <p className={`text-sm font-medium truncate flex-1 ${isActive ? "text-text-primary" : "text-text-secondary"}`}>
-                            {conversation.title || "新建对话"}
-                          </p>
-                          <div className="flex items-center gap-1.5 flex-shrink-0">
-                            <span className="text-[10px] text-text-tertiary">
-                              {formatConversationTime(conversation.updatedAt)}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onDeleteConversation?.(conversation.id);
-                              }}
-                              className="w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-red-400 hover:bg-red-500/10 transition-all"
-                              title="删除对话"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-[11px] text-text-tertiary mt-1 line-clamp-2">
-                          {lastMessage?.text || "暂无消息"}
-                        </p>
+                        <span className="block text-sm font-medium">{mode.label}</span>
+                        <span className="block text-[10px] text-text-tertiary mt-0.5">{mode.desc}</span>
                       </button>
                     );
                   })}
                 </div>
-              </div>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="relative" ref={conversationMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowConversationMenu((prev) => !prev)}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
+                title={activeConversation?.title || "当前对话"}
+              >
+                <Plus size={16} />
+                <ChevronDown size={12} className={`ml-0.5 transition-transform ${showConversationMenu ? "rotate-180" : ""}`} />
+              </button>
+
+              {showConversationMenu && (
+                <div className="absolute right-0 top-[calc(100%+8px)] w-[280px] rounded-2xl border border-border-primary bg-bg-secondary/95 backdrop-blur-xl shadow-2xl p-3 space-y-3 z-30 animate-fade-in">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-text-primary">历史对话</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowConversationMenu(false);
+                        onNewConversation?.();
+                      }}
+                      className="h-9 px-3 rounded-xl bg-accent text-white hover:bg-accent-hover transition-all flex items-center gap-1.5 text-xs font-medium"
+                    >
+                      <Plus size={14} />
+                      新建对话
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-primary">
+                    <Search size={14} className="text-text-tertiary flex-shrink-0" />
+                    <input
+                      type="text"
+                      value={conversationSearch}
+                      onChange={(e) => setConversationSearch(e.target.value)}
+                      placeholder="请输入搜索关键词"
+                      className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-tertiary outline-none"
+                    />
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto space-y-1.5 scrollbar-thin pr-1">
+                    {filteredConversations.length === 0 && (
+                      <div className="px-3 py-6 text-center text-sm text-text-tertiary">
+                        没有匹配的历史对话
+                      </div>
+                    )}
+                    {filteredConversations.map((conversation) => {
+                      const isActive = conversation.id === activeConversationId;
+                      const lastMessage = [...(conversation.messages || [])].reverse().find((message) => message.text?.trim());
+                      return (
+                        <button
+                          key={conversation.id}
+                          type="button"
+                          onClick={() => {
+                            setShowConversationMenu(false);
+                            onSelectConversation?.(conversation.id);
+                          }}
+                          className={`w-full text-left px-3 py-2.5 rounded-xl transition-all border ${
+                            isActive
+                              ? "bg-accent/10 border-accent/30"
+                              : "bg-bg-tertiary border-border-primary hover:bg-bg-hover"
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <p className={`text-sm font-medium truncate flex-1 ${isActive ? "text-text-primary" : "text-text-secondary"}`}>
+                              {conversation.title || "新建对话"}
+                            </p>
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              <span className="text-[10px] text-text-tertiary">
+                                {formatConversationTime(conversation.updatedAt)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onDeleteConversation?.(conversation.id);
+                                }}
+                                className="w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-red-400 hover:bg-red-500/10 transition-all"
+                                title="删除对话"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-[11px] text-text-tertiary mt-1 line-clamp-2">
+                            {lastMessage?.text || "暂无消息"}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+            {onToggleTheme && (
+              <button
+                onClick={onToggleTheme}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-all"
+                title={theme === "dark" ? "切换到浅色" : "切换到深色"}
+              >
+                {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+              </button>
             )}
           </div>
         </div>
@@ -781,42 +803,44 @@ export default function ChatPanel({
 
         {/* Input area */}
         <div className="border-t border-border-primary p-3 flex-shrink-0 space-y-2">
-          <div className="flex items-center gap-2">
-            <div className="inline-flex rounded-xl border border-border-primary bg-bg-tertiary p-1">
-              <button
-                type="button"
-                onClick={() => onComposerModeChange?.("agent")}
-                className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                  composerMode === "agent"
-                    ? "bg-accent text-white"
-                    : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                Agent
-              </button>
-              <button
-                type="button"
-                onClick={() => onComposerModeChange?.("manual")}
-                className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                  composerMode === "manual"
-                    ? "bg-accent text-white"
-                    : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                手动
-              </button>
+          {!isQuickEntryMode && (
+            <div className="flex items-center gap-2">
+              <div className="inline-flex rounded-xl border border-border-primary bg-bg-tertiary p-1">
+                <button
+                  type="button"
+                  onClick={() => onComposerModeChange?.("agent")}
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                    composerMode === "agent"
+                      ? "bg-accent text-white"
+                      : "text-text-secondary hover:text-text-primary"
+                  }`}
+                >
+                  Agent
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onComposerModeChange?.("manual")}
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                    composerMode === "manual"
+                      ? "bg-accent text-white"
+                      : "text-text-secondary hover:text-text-primary"
+                  }`}
+                >
+                  手动
+                </button>
+              </div>
+              {composerMode === "manual" && (
+                <button onClick={onToggleParams}
+                  className="flex items-center gap-1.5 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors flex-1">
+                  <Settings2 size={12} />
+                  <span>生成参数</span>
+                  <ChevronDown size={12} className={`ml-auto transition-transform ${showParams ? "rotate-180" : ""}`} />
+                </button>
+              )}
             </div>
-            {composerMode === "manual" && (
-              <button onClick={onToggleParams}
-                className="flex items-center gap-1.5 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors flex-1">
-                <Settings2 size={12} />
-                <span>生成参数</span>
-                <ChevronDown size={12} className={`ml-auto transition-transform ${showParams ? "rotate-180" : ""}`} />
-              </button>
-            )}
-          </div>
+          )}
 
-          {composerMode === "manual" && showParams && (
+          {!isQuickEntryMode && composerMode === "manual" && showParams && (
             <div className="space-y-3 py-2 animate-fade-in">
               <div>
                 <span className="block text-[11px] text-text-tertiary mb-1.5">模型</span>
@@ -980,6 +1004,10 @@ export default function ChatPanel({
               onKeyDown={handleKeyDown}
               placeholder={
                 dragOver ? "松手添加图片..."
+                : isQuickEntryMode
+                  ? (refImages?.length > 0
+                      ? "描述你想基于参考图生成什么，系统会自动帮你出图..."
+                      : "一句话描述你想生成什么，也可以拖入参考图...")
                 : composerMode === "agent"
                   ? (refImages?.length > 0
                       ? "直接描述目标效果，系统会自动保留参考图关键信息..."

@@ -151,6 +151,7 @@ const DEFAULT_CONVERSATION_TITLE = "新建对话";
 const TEXT_EDIT_ENABLED = false;
 const VALID_SERVICE_TIERS = new Set(["default", "priority"]);
 const DEFAULT_COMPOSER_MODE = "agent";
+const DEFAULT_ENTRY_MODE = "agent";
 const AGENT_DEFAULT_MODEL = "gemini-3.1-flash-image-preview";
 const AGENT_DEFAULT_SERVICE_TIER = "priority";
 
@@ -485,6 +486,7 @@ function HomeInner() {
   const [refImages, setRefImages] = useState([]);
   const [textEditBlocks, setTextEditBlocks] = useState([]);
   const [textEditPanelVisible, setTextEditPanelVisible] = useState(false);
+  const [entryMode, setEntryMode] = useState(DEFAULT_ENTRY_MODE);
   const [composerMode, setComposerMode] = useState(DEFAULT_COMPOSER_MODE);
   const [params, setParams] = useState({
     model: "gemini-3.1-flash-image-preview-512",
@@ -788,7 +790,9 @@ function HomeInner() {
     const composerText = String(sourceText || "").trim();
     const effectiveRefImages = retryPayload?.refImages || refImages;
     const effectiveSemanticSelection = retryPayload?.semanticSelection || semanticSelection;
-    const activeComposerMode = retryPayload?.composerMode || composerMode;
+    const activeEntryMode = retryPayload?.entryMode || entryMode;
+    const requestedComposerMode = retryPayload?.composerMode || composerMode;
+    const activeComposerMode = activeEntryMode === "quick" ? "agent" : requestedComposerMode;
     const baseText = buildTextEditPrompt(composerText, effectiveTextEditBlocks);
     const baseParams = retryPayload?.params || params;
     const effectiveParams = retryPayload?.disableAgentDefaults
@@ -831,6 +835,7 @@ function HomeInner() {
         refImages: messageRefImages,
         requestRefImages: [effectiveSemanticSelection.imageUrl],
         semanticSelection: effectiveSemanticSelection,
+        entryMode: activeEntryMode,
         composerMode: activeComposerMode,
       };
       const aiMsg = {
@@ -842,6 +847,7 @@ function HomeInner() {
         status: "generating",
         urls: [],
         error: null,
+        entryMode: activeEntryMode,
         composerMode: activeComposerMode,
       };
       updateConversationMessages(conversationId, (prev) => [...prev, userMsg, aiMsg]);
@@ -936,6 +942,7 @@ function HomeInner() {
       refImages: messageRefImages,
       requestRefImages: effectiveRefImages,
       textEditBlocks: effectiveTextEditBlocks,
+      entryMode: activeEntryMode,
       composerMode: activeComposerMode,
     };
     const tasks = Array.from({ length: count }, (_, i) => ({
@@ -955,6 +962,7 @@ function HomeInner() {
       tasks,
       urls: [],
       error: null,
+      entryMode: activeEntryMode,
       composerMode: activeComposerMode,
     };
 
@@ -1225,6 +1233,7 @@ function HomeInner() {
     }
   }, [
     composerMode,
+    entryMode,
     prompt,
     isBusy,
     activeConversationId,
@@ -1694,6 +1703,7 @@ function HomeInner() {
     const retryRefImages = previousUserMessage?.requestRefImages || previousUserMessage?.refImages || [];
     const retryTextEditBlocks = previousUserMessage?.textEditBlocks || [];
     const retryComposerMode = previousUserMessage?.composerMode || msg?.composerMode || "manual";
+    const retryEntryMode = previousUserMessage?.entryMode || msg?.entryMode || "agent";
     const retrySemanticSelection = previousUserMessage?.semanticSelection || null;
 
     if (!retryText) {
@@ -1702,6 +1712,7 @@ function HomeInner() {
     }
 
     setPrompt(retryText);
+    setEntryMode(retryEntryMode);
     setComposerMode(retryComposerMode);
     setParamsClamped(retryParams);
     setRefImages(retryRefImages);
@@ -1737,6 +1748,7 @@ function HomeInner() {
       setActiveConversationId(msg._conversationId);
     }
     if (msg.text) setPrompt(msg.text);
+    if (msg.entryMode) setEntryMode(msg.entryMode);
     if (msg.composerMode) setComposerMode(msg.composerMode);
     if (msg.params) setParamsClamped(msg.params);
     setSemanticSelection(msg.semanticSelection || null);
@@ -1913,6 +1925,8 @@ function HomeInner() {
         onDownload={handleDownload}
         onImageClick={handleImageClick}
         onPauseGenerate={handlePauseGenerate}
+        entryMode={entryMode}
+        onEntryModeChange={setEntryMode}
         composerMode={composerMode}
         onComposerModeChange={handleComposerModeChange}
         theme={theme}
