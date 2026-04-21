@@ -432,8 +432,9 @@ export default function ChatPanel({
   const maxImages = currentTier.maxInputImages;
   const currentServiceTier = params.service_tier === "default" ? "default" : "priority";
   const currentEntryMode = entryMode === "quick" ? "quick" : "agent";
-  const currentEntryModeLabel = currentEntryMode === "quick" ? "一键生图" : "Agent";
+  const currentEntryModeLabel = currentEntryMode === "quick" ? "Auto Design" : "Agent";
   const isQuickEntryMode = currentEntryMode === "quick";
+  const [headerHoverVisible, setHeaderHoverVisible] = useState(false);
   const filteredConversations = conversations
     .filter((conversation) => {
       const query = conversationSearch.trim().toLowerCase();
@@ -609,9 +610,21 @@ export default function ChatPanel({
       </div>
 
       {/* Panel content */}
-      <div className="flex-1 bg-bg-secondary border-l border-border-primary flex flex-col h-full min-w-0">
+      <div className="relative flex-1 bg-bg-secondary border-l border-border-primary flex flex-col h-full min-w-0">
+        <div
+          className="absolute top-0 left-0 right-0 z-20 h-5"
+          onMouseEnter={() => setHeaderHoverVisible(true)}
+        />
         {/* Header */}
-        <div className="h-12 px-4 flex items-center justify-between border-b border-border-primary flex-shrink-0">
+        <div
+          className={`absolute top-0 left-0 right-0 z-30 h-12 px-4 flex items-center justify-between border-b border-border-primary bg-bg-secondary/92 backdrop-blur-xl transition-all duration-200 ${
+            headerHoverVisible || showConversationMenu || showEntryModeMenu
+              ? "opacity-100 translate-y-0"
+              : "opacity-0 -translate-y-full pointer-events-none"
+          }`}
+          onMouseEnter={() => setHeaderHoverVisible(true)}
+          onMouseLeave={() => setHeaderHoverVisible(false)}
+        >
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center">
               <BrandLogo className="w-3.5 h-3.5 text-white" />
@@ -629,7 +642,7 @@ export default function ChatPanel({
                 <div className="absolute left-0 top-[calc(100%+8px)] min-w-[132px] rounded-2xl border border-border-primary bg-bg-secondary/95 backdrop-blur-xl shadow-2xl p-1.5 z-30 animate-fade-in">
                   {[
                     { id: "agent", label: "Agent", desc: "适合有设计基础" },
-                    { id: "quick", label: "一键生图", desc: "适合非设计人员" },
+                    { id: "quick", label: "Auto Design", desc: "适合非设计人员" },
                   ].map((mode) => {
                     const active = currentEntryMode === mode.id;
                     return (
@@ -770,20 +783,22 @@ export default function ChatPanel({
               <p className="text-xs text-text-tertiary leading-relaxed mb-4">
                 支持拖拽多张图片进行参考或编辑
               </p>
-              <div className="w-full space-y-1.5 text-left">
-                {MODEL_TIERS.map((t) => {
-                  const Icon = t.icon;
-                  return (
-                    <div key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary">
-                      <Icon size={14} className={t.color} />
-                      <div>
-                        <p className="text-[11px] text-text-primary font-medium">{t.name}</p>
-                        <p className="text-[10px] text-text-tertiary">{t.desc} · 最多{t.maxInputImages}张参考图</p>
+              {!isQuickEntryMode && (
+                <div className="w-full space-y-1.5 text-left">
+                  {MODEL_TIERS.map((t) => {
+                    const Icon = t.icon;
+                    return (
+                      <div key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary">
+                        <Icon size={14} className={t.color} />
+                        <div>
+                          <p className="text-[11px] text-text-primary font-medium">{t.name}</p>
+                          <p className="text-[10px] text-text-tertiary">{t.desc} · 最多{t.maxInputImages}张参考图</p>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
           {messages.map((msg) => (

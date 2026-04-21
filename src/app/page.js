@@ -80,7 +80,7 @@ export default function HomePage() {
           className="absolute inset-0 w-full h-full object-cover"
           src="/videos/hero.mp4"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-bg-primary/80 via-bg-primary/44 to-bg-primary/16" />
+        <div className="absolute inset-0 bg-gradient-to-t from-bg-primary/38 via-bg-primary/14 to-transparent" />
 
         <div className={`absolute inset-0 flex flex-col items-center justify-end pb-24 lg:pb-32 px-6 text-center transition-all duration-700 ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"}`}>
           <h1 className="text-4xl lg:text-6xl font-bold text-text-primary leading-tight tracking-tight mb-5">

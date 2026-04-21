@@ -53,7 +53,12 @@ export async function POST(request) {
       data: {
         imageId: result.imageId,
         urls: [result.url],
-        tasks: [{ id: `object-edit-${result.imageId}`, index: 0, url: result.url, status: "completed" }],
+        tasks: [{
+          id: result.imageId ? `object-edit-${result.imageId}` : "object-edit-0",
+          index: 0,
+          url: result.url,
+          status: "completed",
+        }],
       },
     });
   } catch (err) {

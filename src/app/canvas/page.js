@@ -38,6 +38,274 @@ function parseQuantityToken(tok) {
   return 0;
 }
 
+const ASPECT_RATIO_CANDIDATES = [
+  { value: "1:1", ratio: 1 },
+  { value: "16:9", ratio: 16 / 9 },
+  { value: "9:16", ratio: 9 / 16 },
+  { value: "4:3", ratio: 4 / 3 },
+  { value: "3:4", ratio: 3 / 4 },
+  { value: "3:2", ratio: 3 / 2 },
+  { value: "2:3", ratio: 2 / 3 },
+  { value: "4:5", ratio: 4 / 5 },
+  { value: "5:4", ratio: 5 / 4 },
+  { value: "21:9", ratio: 21 / 9 },
+];
+
+const ASPECT_RATIO_RULES = [
+  { value: "1:1", score: 6, keywords: ["1:1", "1：1", "1比1", "正方形", "方图", "方版", "方形", "square"] },
+  { value: "1:1", score: 5, keywords: ["logo", "图标", "头像", "icon", "贴纸", "表情包"] },
+  { value: "1:1", score: 5, keywords: ["电商主图", "商品主图", "淘宝主图", "京东主图", "拼多多主图", "亚马逊主图", "白底图"] },
+  { value: "1:1", score: 4, keywords: ["sku图", "sku主图", "款式图", "商品方图", "产品卡片图", "商品卡片图"] },
+  { value: "16:9", score: 6, keywords: ["16:9", "16：9", "16比9", "宽屏", "横屏", "横版", "landscape"] },
+  { value: "16:9", score: 5, keywords: ["banner", "横幅", "头图", "网页首屏", "网站首屏", "官网首屏", "ppt首图", "ppt封面", "youtube封面", "电脑壁纸"] },
+  { value: "16:9", score: 4, keywords: ["ppt", "演示文稿", "发布会大屏", "横版kv", "横版海报", "横版封面", "公众号头图", "公众号首图", "b站封面", "bilibili封面", "视频封面横版"] },
+  { value: "9:16", score: 6, keywords: ["9:16", "9：16", "9比16", "竖屏", "竖版", "手机尺寸", "手机比例", "手机屏幕"] },
+  { value: "9:16", score: 5, keywords: ["抖音", "快手", "视频号", "直播间", "直播带货", "story", "stories", "reel", "reels", "short", "shorts"] },
+  { value: "9:16", score: 4, keywords: ["手机壁纸", "开屏", "直播预告", "短视频封面", "短视频", "全屏海报", "电商详情长图", "商品详情长图"] },
+  { value: "4:3", score: 6, keywords: ["4:3", "4：3", "4比3"] },
+  { value: "4:3", score: 4, keywords: ["演示页", "课件封面", "幻灯片配图", "平板壁纸", "ipad壁纸", "教学课件"] },
+  { value: "3:4", score: 6, keywords: ["3:4", "3：4", "3比4"] },
+  { value: "3:4", score: 5, keywords: ["海报", "宣传海报", "活动海报", "招聘海报", "竖版海报", "宣传单页", "菜单", "价目表", "节目单"] },
+  { value: "3:4", score: 4, keywords: ["封面海报", "海报风", "展架海报", "易拉宝", "竖版物料", "a4", "a4海报", "传单", "证件照"] },
+  { value: "2:3", score: 6, keywords: ["2:3", "2：3", "2比3"] },
+  { value: "2:3", score: 4, keywords: ["电影海报", "摄影竖图", "书籍封面", "小说封面", "专辑封面", "杂志封面"] },
+  { value: "3:2", score: 6, keywords: ["3:2", "3：2", "3比2"] },
+  { value: "3:2", score: 4, keywords: ["摄影横图", "相机画幅", "横向摄影", "横向展示图", "产品横图"] },
+  { value: "4:5", score: 6, keywords: ["4:5", "4：5", "4比5"] },
+  { value: "4:5", score: 5, keywords: ["小红书封面", "ins封面", "instagram封面", "社媒封面", "笔记封面", "朋友圈配图"] },
+  { value: "4:5", score: 4, keywords: ["社交媒体封面", "商品种草图", "内容封面", "穿搭封面", "美食封面", "种草封面"] },
+  { value: "5:4", score: 6, keywords: ["5:4", "5：4", "5比4"] },
+  { value: "5:4", score: 4, keywords: ["详情页首图", "产品展示图", "商品展示图", "亚马逊详情图", "横版商品图"] },
+  { value: "21:9", score: 6, keywords: ["21:9", "21：9", "21比9"] },
+  { value: "21:9", score: 5, keywords: ["超宽", "电影感宽屏", "电影横幅", "cinematic", "ultrawide"] },
+];
+
+function findClosestAspectRatio(width, height) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return "1:1";
+  }
+
+  const target = width / height;
+  let best = ASPECT_RATIO_CANDIDATES[0];
+  let bestDiff = Math.abs(best.ratio - target);
+
+  for (const candidate of ASPECT_RATIO_CANDIDATES.slice(1)) {
+    const diff = Math.abs(candidate.ratio - target);
+    if (diff < bestDiff) {
+      best = candidate;
+      bestDiff = diff;
+    }
+  }
+
+  return best.value;
+}
+
+function inferAspectRatioFromPrompt(text) {
+  if (!text || typeof text !== "string") return "1:1";
+
+  const normalized = text.toLowerCase();
+  const compact = normalized.replace(/\s+/g, "");
+  const hasAny = (keywords) => keywords.some((keyword) => compact.includes(keyword));
+
+  const explicitRatioMatch = compact.match(/(21|16|9|8|5|4|3|2|1)\s*[:：/xX]\s*(9|16|8|5|4|3|2|1)/);
+  if (explicitRatioMatch) {
+    return findClosestAspectRatio(
+      Number(explicitRatioMatch[1]),
+      Number(explicitRatioMatch[2])
+    );
+  }
+
+  const explicitBiMatch = compact.match(/(21|16|9|8|5|4|3|2|1)\s*比\s*(9|16|8|5|4|3|2|1)/);
+  if (explicitBiMatch) {
+    return findClosestAspectRatio(
+      Number(explicitBiMatch[1]),
+      Number(explicitBiMatch[2])
+    );
+  }
+
+  const dimensionMatch = compact.match(/(\d{3,5})\s*[xX*＊]\s*(\d{3,5})/);
+  if (dimensionMatch) {
+    return findClosestAspectRatio(
+      Number(dimensionMatch[1]),
+      Number(dimensionMatch[2])
+    );
+  }
+
+  const scores = new Map(ASPECT_RATIO_CANDIDATES.map((candidate) => [candidate.value, 0]));
+  const addScore = (ratio, delta) => {
+    scores.set(ratio, (scores.get(ratio) || 0) + delta);
+  };
+  for (const rule of ASPECT_RATIO_RULES) {
+    if (rule.keywords.some((keyword) => compact.includes(keyword))) {
+      addScore(rule.value, rule.score);
+    }
+  }
+
+  if (compact.includes("淘宝") || compact.includes("天猫") || compact.includes("京东") || compact.includes("拼多多")) {
+    if (compact.includes("主图")) {
+      addScore("1:1", 6);
+    }
+    if (compact.includes("详情")) {
+      addScore("9:16", 4);
+      addScore("5:4", 2);
+    }
+  }
+  if (compact.includes("亚马逊")) {
+    if (compact.includes("主图")) {
+      addScore("1:1", 6);
+    }
+    if (compact.includes("详情")) {
+      addScore("5:4", 5);
+    }
+  }
+  if (compact.includes("小红书")) {
+    if (compact.includes("封面") || compact.includes("笔记")) {
+      addScore("4:5", 6);
+    }
+    if (compact.includes("竖版") || compact.includes("长图")) {
+      addScore("4:5", 2);
+      addScore("9:16", 2);
+    }
+  }
+  if (compact.includes("抖音") || compact.includes("快手") || compact.includes("视频号")) {
+    addScore("9:16", 5);
+    if (compact.includes("封面") || compact.includes("预告")) {
+      addScore("9:16", 3);
+    }
+  }
+  if (compact.includes("公众号") || compact.includes("微信文章")) {
+    if (compact.includes("头图") || compact.includes("首图") || compact.includes("封面")) {
+      addScore("16:9", 6);
+    }
+  }
+  if (compact.includes("b站") || compact.includes("bilibili") || compact.includes("youtube")) {
+    if (compact.includes("封面") || compact.includes("缩略图")) {
+      addScore("16:9", 6);
+    }
+  }
+  if (compact.includes("详情") && (compact.includes("长图") || compact.includes("长页"))) {
+    addScore("9:16", 5);
+  }
+  if (compact.includes("壁纸")) {
+    if (compact.includes("手机")) {
+      addScore("9:16", 5);
+    }
+    if (compact.includes("电脑") || compact.includes("桌面")) {
+      addScore("16:9", 5);
+    }
+    if (compact.includes("平板") || compact.includes("ipad")) {
+      addScore("4:3", 5);
+    }
+  }
+  if (compact.includes("封面")) {
+    if (compact.includes("小红书") || compact.includes("ins") || compact.includes("instagram") || compact.includes("笔记")) {
+      addScore("4:5", 4);
+    } else if (compact.includes("视频") || compact.includes("短视频") || compact.includes("抖音") || compact.includes("快手")) {
+      addScore("9:16", 4);
+    } else if (compact.includes("书") || compact.includes("杂志") || compact.includes("小说")) {
+      addScore("2:3", 4);
+    }
+  }
+  if (compact.includes("电商") || compact.includes("商品")) {
+    if (compact.includes("主图")) {
+      addScore("1:1", 5);
+    }
+    if (compact.includes("详情")) {
+      addScore("5:4", 3);
+      addScore("9:16", 2);
+    }
+  }
+  if (compact.includes("菜单") || compact.includes("价目表") || compact.includes("节目单") || compact.includes("a4") || compact.includes("传单")) {
+    addScore("3:4", 4);
+  }
+  if (compact.includes("证件照")) {
+    addScore("3:4", 5);
+  }
+  if (compact.includes("书籍") || compact.includes("小说") || compact.includes("杂志")) {
+    if (compact.includes("封面")) {
+      addScore("2:3", 5);
+    }
+    if (compact.includes("内页")) {
+      addScore("3:4", 4);
+    }
+  }
+  if (compact.includes("摄影") || compact.includes("相机")) {
+    if (compact.includes("横图")) {
+      addScore("3:2", 5);
+    }
+    if (compact.includes("竖图")) {
+      addScore("2:3", 5);
+    }
+  }
+  if (compact.includes("超宽") || compact.includes("全景") || compact.includes("电影感")) {
+    addScore("21:9", 4);
+  }
+
+  // 冲突裁决：当平台场景和通用物料词混用时，优先采用更具体的平台目标比例。
+  if (hasAny(["小红书"]) && hasAny(["封面", "笔记"])) {
+    addScore("4:5", 8);
+  }
+  if (hasAny(["抖音", "快手", "视频号"]) && hasAny(["封面", "预告", "直播间", "直播带货"])) {
+    addScore("9:16", 8);
+  }
+  if (hasAny(["公众号", "微信文章"]) && hasAny(["头图", "首图", "封面"])) {
+    addScore("16:9", 8);
+  }
+  if (hasAny(["b站", "bilibili", "youtube"]) && hasAny(["封面", "缩略图"])) {
+    addScore("16:9", 8);
+  }
+  if (hasAny(["淘宝", "天猫", "京东", "拼多多", "亚马逊"]) && hasAny(["主图", "白底图"])) {
+    addScore("1:1", 8);
+  }
+  if (hasAny(["淘宝", "天猫", "京东", "拼多多"]) && hasAny(["详情", "长图", "长页"])) {
+    addScore("9:16", 7);
+  }
+  if (hasAny(["亚马逊"]) && hasAny(["详情", "展示图"])) {
+    addScore("5:4", 7);
+  }
+  if (hasAny(["海报"]) && hasAny(["小红书", "笔记"])) {
+    addScore("4:5", 5);
+  }
+  if (hasAny(["海报"]) && hasAny(["抖音", "快手", "视频号", "手机尺寸"])) {
+    addScore("9:16", 5);
+  }
+  if (hasAny(["海报"]) && hasAny(["公众号", "微信文章", "头图", "首图"])) {
+    addScore("16:9", 5);
+  }
+  if (hasAny(["横版海报", "横版封面", "横版kv"])) {
+    addScore("16:9", 6);
+  }
+  if (hasAny(["竖版海报", "宣传单页", "易拉宝", "a4海报"])) {
+    addScore("3:4", 6);
+  }
+  if (hasAny(["书籍", "小说", "杂志"]) && hasAny(["封面", "海报"])) {
+    addScore("2:3", 6);
+  }
+
+  let bestRatio = "1:1";
+  let bestScore = 0;
+  for (const candidate of ASPECT_RATIO_CANDIDATES) {
+    const score = scores.get(candidate.value) || 0;
+    if (score > bestScore) {
+      bestRatio = candidate.value;
+      bestScore = score;
+      continue;
+    }
+    if (score === bestScore && bestScore > 0) {
+      const tieBreakerOrder = ["9:16", "4:5", "16:9", "3:4", "1:1", "5:4", "2:3", "3:2", "4:3", "21:9"];
+      if (tieBreakerOrder.indexOf(candidate.value) < tieBreakerOrder.indexOf(bestRatio)) {
+        bestRatio = candidate.value;
+      }
+    }
+  }
+
+  if (bestScore > 0) {
+    return bestRatio;
+  }
+
+  return "1:1";
+}
+
 /** 从提示词推测要出几张（如「三套」「3张」），与侧栏张数取较大值，上限 MAX_GEN_COUNT */
 function inferLoopCountFromPrompt(text) {
   if (!text || typeof text !== "string") return 0;
@@ -831,7 +1099,7 @@ function HomeInner() {
         role: "user",
         text: composerText,
         params: sharedParams,
-        modelLabel: "SAM + GPT + OpenAI Images",
+        modelLabel: "SAM + GPT + Nano Edit",
         refImages: messageRefImages,
         requestRefImages: [effectiveSemanticSelection.imageUrl],
         semanticSelection: effectiveSemanticSelection,
@@ -843,7 +1111,7 @@ function HomeInner() {
         role: "assistant",
         text: composerText,
         params: sharedParams,
-        modelLabel: "SAM + GPT + OpenAI Images",
+        modelLabel: "SAM + GPT + Nano Edit",
         status: "generating",
         urls: [],
         error: null,
@@ -913,7 +1181,18 @@ function HomeInner() {
     const conversationId = activeConversationId;
     const userMsgId = "user-" + ts;
     const aiMsgId = "ai-" + ts;
-    const modelLabel = MODEL_LABELS[effectiveParams.model] || effectiveParams.model;
+    const inferredQuickRatio = !effectiveRefImages.length && activeEntryMode === "quick"
+      ? inferAspectRatioFromPrompt(composerText || text)
+      : null;
+    const resolvedParams = inferredQuickRatio
+      ? {
+          ...effectiveParams,
+          image_size: inferredQuickRatio,
+          _autoRatio: undefined,
+          _autoDimensions: undefined,
+        }
+      : effectiveParams;
+    const modelLabel = MODEL_LABELS[resolvedParams.model] || resolvedParams.model;
     const hasImages = effectiveRefImages.length > 0;
 
     const messageRefImages = hasImages
@@ -930,7 +1209,7 @@ function HomeInner() {
       MAX_GEN_COUNT
     );
     const variantDescriptors = getVariantDescriptors(composerText || text, count);
-    const genParams = { ...effectiveParams, num: count };
+    const genParams = { ...resolvedParams, num: count };
     const displayText = composerText || "请按识别到的文本替换规则编辑图片中的文字";
 
     const userMsg = {
@@ -997,9 +1276,9 @@ function HomeInner() {
       );
 
       const imageSize =
-        effectiveParams.image_size === "auto"
-          ? (effectiveParams._autoRatio || "1:1")
-          : effectiveParams.image_size;
+        resolvedParams.image_size === "auto"
+          ? (resolvedParams._autoRatio || "1:1")
+          : resolvedParams.image_size;
       const placeholderAspectRatio = parseAspectRatio(imageSize);
       const imagePayload =
         preparedImages.length === 1 ? preparedImages[0] : preparedImages;
@@ -1059,11 +1338,11 @@ function HomeInner() {
                 body: JSON.stringify({
                   prompt: requestPrompt,
                   image: imagePayload,
-                  model: effectiveParams.model,
+                  model: resolvedParams.model,
                   image_size: imageSize,
                   num: 1,
                   mode: editMode,
-                  service_tier: effectiveParams.service_tier,
+                  service_tier: resolvedParams.service_tier,
                 }),
               });
             } else {
@@ -1073,10 +1352,10 @@ function HomeInner() {
                 signal: requestController.signal,
                 body: JSON.stringify({
                   prompt: requestPrompt,
-                  model: effectiveParams.model,
+                  model: resolvedParams.model,
                   image_size: imageSize,
                   num: 1,
-                  service_tier: effectiveParams.service_tier,
+                  service_tier: resolvedParams.service_tier,
                 }),
               });
             }
@@ -1113,7 +1392,6 @@ function HomeInner() {
               );
               return { status: "failed" };
             }
-
             patchTask(conversationId, aiMsgId, taskId, {
               status: "completed",
               url,
