@@ -434,7 +434,6 @@ export default function ChatPanel({
   const currentEntryMode = entryMode === "quick" ? "quick" : "agent";
   const currentEntryModeLabel = currentEntryMode === "quick" ? "Auto Design" : "Agent";
   const isQuickEntryMode = currentEntryMode === "quick";
-  const [headerHoverVisible, setHeaderHoverVisible] = useState(false);
   const filteredConversations = conversations
     .filter((conversation) => {
       const query = conversationSearch.trim().toLowerCase();
@@ -610,21 +609,9 @@ export default function ChatPanel({
       </div>
 
       {/* Panel content */}
-      <div className="relative flex-1 bg-bg-secondary border-l border-border-primary flex flex-col h-full min-w-0">
-        <div
-          className="absolute top-0 left-0 right-0 z-20 h-5"
-          onMouseEnter={() => setHeaderHoverVisible(true)}
-        />
+      <div className="flex-1 bg-bg-secondary border-l border-border-primary flex flex-col h-full min-w-0">
         {/* Header */}
-        <div
-          className={`absolute top-0 left-0 right-0 z-30 h-12 px-4 flex items-center justify-between border-b border-border-primary bg-bg-secondary/92 backdrop-blur-xl transition-all duration-200 ${
-            headerHoverVisible || showConversationMenu || showEntryModeMenu
-              ? "opacity-100 translate-y-0"
-              : "opacity-0 -translate-y-full pointer-events-none"
-          }`}
-          onMouseEnter={() => setHeaderHoverVisible(true)}
-          onMouseLeave={() => setHeaderHoverVisible(false)}
-        >
+        <div className="h-12 px-4 flex items-center justify-between border-b border-border-primary flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-6 h-6 rounded-full bg-accent flex items-center justify-center">
               <BrandLogo className="w-3.5 h-3.5 text-white" />

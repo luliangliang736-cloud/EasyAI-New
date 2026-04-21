@@ -13,6 +13,8 @@ import { useHistory } from "@/lib/useHistory";
 import { useTheme } from "@/lib/useTheme";
 import { MAX_GEN_COUNT } from "@/lib/genLimits";
 
+const FLOATING_ENTRY_DRAFT_KEY = "lovart-floating-entry-draft";
+
 function errStr(e) {
   if (!e) return "未知错误";
   if (typeof e === "string") return e;
@@ -890,6 +892,24 @@ function HomeInner() {
       localStorage.removeItem("lovart-canvas-texts");
       localStorage.removeItem("lovart-canvas-shapes");
     }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const rawDraft = localStorage.getItem(FLOATING_ENTRY_DRAFT_KEY);
+      if (!rawDraft) return;
+      const draft = JSON.parse(rawDraft);
+      if (draft?.prompt) {
+        setPrompt(String(draft.prompt));
+      }
+      if (draft?.entryMode === "agent" || draft?.entryMode === "quick") {
+        setEntryMode(draft.entryMode);
+      }
+      if (Array.isArray(draft?.images) && draft.images.length > 0) {
+        setRefImages(draft.images.filter((item) => typeof item === "string" && item));
+      }
+      localStorage.removeItem(FLOATING_ENTRY_DRAFT_KEY);
+    } catch {}
   }, []);
 
   useEffect(() => {
