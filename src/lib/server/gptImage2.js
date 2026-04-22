@@ -211,7 +211,6 @@ async function postFormData(url, {
   const timer = setTimeout(() => controller.abort(), GPT_IMAGE_2_TIMEOUT_MS);
   try {
     const formData = new FormData();
-    formData.append("model", model);
     formData.append("prompt", prompt);
     formData.append("n", String(n));
     formData.append("size", size);
