@@ -16,7 +16,42 @@ const FLOATING_DEFAULT_MODEL = "gemini-3.1-flash-image-preview-512";
 const FLOATING_DEFAULT_SERVICE_TIER = "priority";
 const FLOATING_AGENT_DEFAULT_MODEL = "gemini-3.1-flash-image-preview";
 const FLOATING_AGENT_DEFAULT_SERVICE_TIER = "priority";
+const FLOATING_EDIT_MODEL = "gpt-image-2";
 const FLOATING_HISTORY_STORAGE_KEY = "lovart-floating-entry-home-history";
+const HERO_LAYOUT_PRESETS = {
+  desktop: {
+    container: "pb-24 lg:pb-32",
+    title: "text-4xl lg:text-6xl leading-tight mb-5",
+    description: "text-base lg:text-lg max-w-2xl mb-10",
+    actions: "gap-4",
+    primaryButton: "h-12 px-8",
+    secondaryButton: "h-12 px-8",
+  },
+  mac13: {
+    container: "pb-12 sm:pb-14 lg:pb-16",
+    title: "text-3xl sm:text-[34px] lg:text-[44px] leading-[1.06] mb-3.5",
+    description: "text-sm sm:text-[15px] lg:text-base max-w-lg mb-7",
+    actions: "gap-3",
+    primaryButton: "h-10 px-6 text-sm",
+    secondaryButton: "h-10 px-6 text-sm",
+  },
+  mac14: {
+    container: "pb-14 sm:pb-16 lg:pb-20",
+    title: "text-3xl sm:text-4xl lg:text-5xl leading-[1.08] mb-4",
+    description: "text-sm sm:text-base lg:text-[17px] max-w-xl mb-8",
+    actions: "gap-3 sm:gap-4",
+    primaryButton: "h-11 px-7 text-sm",
+    secondaryButton: "h-11 px-7 text-sm",
+  },
+  mac16: {
+    container: "pb-[4.5rem] sm:pb-20 lg:pb-24",
+    title: "text-[34px] sm:text-[40px] lg:text-[54px] leading-[1.08] mb-[18px]",
+    description: "text-base lg:text-lg max-w-xl mb-9",
+    actions: "gap-4",
+    primaryButton: "h-11 px-[30px] text-sm",
+    secondaryButton: "h-11 px-[30px] text-sm",
+  },
+};
 
 function createFloatingMessage(role, text = "", extra = {}) {
   return {
@@ -257,6 +292,13 @@ function resolveAgentParams(baseParams, promptText, refImages = []) {
   };
 }
 
+function resolveFloatingGenerationModel({ hasImages = false, isAgentMode = false, agentParams = {} } = {}) {
+  if (hasImages) {
+    return FLOATING_EDIT_MODEL;
+  }
+  return isAgentMode ? agentParams.model : FLOATING_DEFAULT_MODEL;
+}
+
 function detectFloatingEntryMode(promptText, refImages = []) {
   if (Array.isArray(refImages) && refImages.length > 0) {
     return "agent";
@@ -358,6 +400,7 @@ const MODELS = [
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
   const [navVisible, setNavVisible] = useState(false);
+  const [heroLayoutPreset, setHeroLayoutPreset] = useState("desktop");
   const [floatingPrompt, setFloatingPrompt] = useState("");
   const [floatingRefImages, setFloatingRefImages] = useState([]);
   const [floatingAttachments, setFloatingAttachments] = useState([]);
@@ -373,6 +416,41 @@ export default function HomePage() {
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => setMounted(true));
     return () => window.cancelAnimationFrame(frameId);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const updateMacHeroLayout = () => {
+      const platform = String(window.navigator.platform || "").toLowerCase();
+      const userAgent = String(window.navigator.userAgent || "").toLowerCase();
+      const isMac = platform.includes("mac") || userAgent.includes("macintosh");
+
+      if (!isMac) {
+        setHeroLayoutPreset("desktop");
+        return;
+      }
+
+      const { innerWidth: width, innerHeight: height } = window;
+      if (width <= 1512 || height <= 900) {
+        setHeroLayoutPreset("mac13");
+        return;
+      }
+      if (width <= 1728 || height <= 1040) {
+        setHeroLayoutPreset("mac14");
+        return;
+      }
+      if (width <= 2056 || height <= 1180) {
+        setHeroLayoutPreset("mac16");
+        return;
+      }
+
+      setHeroLayoutPreset("desktop");
+    };
+
+    updateMacHeroLayout();
+    window.addEventListener("resize", updateMacHeroLayout);
+    return () => window.removeEventListener("resize", updateMacHeroLayout);
   }, []);
 
   useEffect(() => {
@@ -396,6 +474,8 @@ export default function HomePage() {
       );
     } catch {}
   }, [floatingHistory]);
+
+  const heroPreset = HERO_LAYOUT_PRESETS[heroLayoutPreset] || HERO_LAYOUT_PRESETS.desktop;
 
   const resetFloatingConversation = () => {
     setFloatingPrompt("");
@@ -542,7 +622,7 @@ export default function HomePage() {
             assistantText: submittedImages.length > 0
               ? "我直接按你的要求开始改图。"
               : "我直接按你的要求开始生图。",
-            assistantModel: "直连 Nano",
+            assistantModel: submittedImages.length > 0 ? "直连 GPT Image 2" : "直连 Nano",
           }
         : await (async () => {
             const plannerRes = await fetch("/api/floating-assistant", {
@@ -595,20 +675,25 @@ export default function HomePage() {
       const imageSize = isAgentMode
         ? (agentParams.image_size === "auto" ? (firstRefMeta?.ratio || "1:1") : agentParams.image_size)
         : quickImageSize;
+      const generationModel = resolveFloatingGenerationModel({
+        hasImages,
+        isAgentMode,
+        agentParams,
+      });
       const endpoint = hasImages ? "/api/edit" : "/api/generate";
       const finalPrompt = isAgentMode ? buildAgentPrompt(generationPrompt, submittedImages) : generationPrompt;
       const payload = hasImages
         ? {
             prompt: finalPrompt,
             image: submittedImages.length === 1 ? submittedImages[0] : submittedImages,
-            model: isAgentMode ? agentParams.model : FLOATING_DEFAULT_MODEL,
+            model: generationModel,
             image_size: imageSize,
             num: 1,
             service_tier: isAgentMode ? agentParams.service_tier : FLOATING_DEFAULT_SERVICE_TIER,
           }
         : {
             prompt: finalPrompt,
-            model: isAgentMode ? agentParams.model : FLOATING_DEFAULT_MODEL,
+            model: generationModel,
             image_size: imageSize,
             num: 1,
             ref_images: submittedImages,
@@ -637,7 +722,7 @@ export default function HomePage() {
           assistantText || (resolvedMode === "agent" ? "我已经按你的要求整理并生成了一版结果。" : "我已经帮你快速生成了一版结果。"),
           {
             images: urls,
-            modelLabel: `${plan.assistantModel || "gpt-5.4"} · ${isAgentMode ? agentParams.model : FLOATING_DEFAULT_MODEL}`,
+            modelLabel: `${plan.assistantModel || "gpt-5.4"} · ${generationModel}`,
           }
         ),
       ]);
@@ -703,25 +788,25 @@ export default function HomePage() {
         />
         <div className="absolute inset-0 bg-gradient-to-t from-bg-primary/38 via-bg-primary/14 to-transparent" />
 
-        <div className={`absolute inset-0 flex flex-col items-center justify-end pb-24 lg:pb-32 px-6 text-center transition-all duration-700 ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"}`}>
-          <h1 className="text-4xl lg:text-6xl font-bold text-text-primary leading-tight tracking-tight mb-5">
+        <div className={`absolute inset-0 flex flex-col items-center justify-end px-6 text-center transition-all duration-700 ${heroPreset.container} ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"}`}>
+          <h1 className={`font-bold text-text-primary tracking-tight ${heroPreset.title}`}>
             用 <span style={{ color: "#3FCA58" }}>AI</span> 释放
             <br />你的创意想象力
           </h1>
-          <p className="text-base lg:text-lg text-text-secondary max-w-2xl mx-auto leading-relaxed mb-10">
+          <p className={`text-text-secondary mx-auto leading-relaxed ${heroPreset.description}`}>
             输入文字描述，AI 即刻生成高质量图片。支持多图参考、风格迁移、材质替换，在交互式画布上自由编排你的创作。
           </p>
-          <div className="flex items-center justify-center gap-4">
+          <div className={`flex items-center justify-center ${heroPreset.actions}`}>
             <Link
               href="/canvas"
-              className="h-12 px-8 rounded-full bg-white text-black font-medium flex items-center gap-2.5 transition-all hover:bg-white/90 hover:scale-[1.02] active:scale-[0.98]"
+              className={`rounded-full bg-white text-black font-medium flex items-center gap-2.5 transition-all hover:bg-white/90 hover:scale-[1.02] active:scale-[0.98] ${heroPreset.primaryButton}`}
             >
               <MousePointer2 size={18} />
               开始创作
             </Link>
             <a
               href="#features"
-              className="h-12 px-8 rounded-full bg-bg-secondary/80 text-text-secondary hover:text-text-primary hover:bg-bg-hover font-medium flex items-center gap-2 transition-all"
+              className={`rounded-full bg-bg-secondary/80 text-text-secondary hover:text-text-primary hover:bg-bg-hover font-medium flex items-center gap-2 transition-all ${heroPreset.secondaryButton}`}
             >
               了解更多
             </a>

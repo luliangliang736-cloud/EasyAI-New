@@ -132,115 +132,281 @@ function formatHistoryTime(value) {
   }
 }
 
-function renderAssistantTextBlock(text, isLightTheme) {
+function parseAssistantLabelLine(line) {
+  const patterns = [
+    { type: "source", regex: /^(?:🗞️\s*)?(?:来源)[:：]\s*(.+)$/ },
+    { type: "summary", regex: /^(?:📌\s*)?(?:核心|摘要)[:：]\s*(.+)$/ },
+    { type: "value", regex: /^(?:💡\s*)?(?:价值|意义|启发)[:：]\s*(.+)$/ },
+    { type: "link", regex: /^(?:🔗\s*)?(?:链接)[:：]\s*(.+)$/ },
+    { type: "trend", regex: /^(?:🔥\s*)?(?:趋势|热点)[:：]\s*(.+)$/ },
+  ];
+
+  for (const pattern of patterns) {
+    const match = line.match(pattern.regex);
+    if (match) {
+      return {
+        type: pattern.type,
+        content: (match[1] || "").trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+function isAssistantItemTitle(line) {
+  return /^(\d+\.\s|[1-9]\uFE0F?\u20E3\s)/.test(line);
+}
+
+function isAssistantLeadLine(line) {
+  return /^(📰|✨|📚|🎯|🔎|📍|✅|👉|💬|📝)/.test(line) || /Top\s*\d+/i.test(line);
+}
+
+function extractAssistantTitleParts(line) {
+  const match = line.match(/^((?:\d+\.)|(?:[1-9]\uFE0F?\u20E3))\s*(.+)$/);
+  if (!match) {
+    return { marker: "", content: line };
+  }
+
+  return {
+    marker: match[1].trim(),
+    content: (match[2] || "").trim(),
+  };
+}
+
+function isEmojiMarker(marker) {
+  return /\uFE0F|\u20E3/.test(String(marker || ""));
+}
+
+function splitSourceMeta(content) {
+  const parts = String(content || "")
+    .split(/\s+[·•|｜]\s+|，(?=\d{4}-\d{2}-\d{2})/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return {
+    source: parts[0] || "",
+    meta: parts.slice(1).join(" · "),
+  };
+}
+
+function splitAssistantBlocks(text) {
   const lines = String(text || "").split("\n");
+  const blocks = [];
+  let currentBlock = [];
 
-  return (
-    <div className="space-y-1.5">
-      {lines.map((rawLine, index) => {
-        const line = rawLine.trim();
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
 
-        if (!line) {
-          return <div key={`blank-${index}`} className="h-2" />;
-        }
+    if (!line) {
+      if (currentBlock.length > 0) {
+        blocks.push(currentBlock);
+        currentBlock = [];
+      }
+      continue;
+    }
 
-        if (/^(\d+\.\s|[1-9]\uFE0F?\u20E3\s)/.test(line)) {
-          return (
-            <div
-              key={`title-${index}`}
-              className={`pt-3 text-[18px] font-semibold leading-8 ${
-                isLightTheme ? "text-[#111111]" : "text-white"
-              }`}
-            >
-              {line}
-            </div>
-          );
-        }
+    if (isAssistantItemTitle(line) && currentBlock.length > 0) {
+      blocks.push(currentBlock);
+      currentBlock = [line];
+      continue;
+    }
 
-        if (/^(📰|✨|📚|🎯|📌|🔎|📍|💡|✅|👉|💬|📝)/.test(line)) {
-          return (
-            <div
-              key={`lead-${index}`}
-              className={`text-[17px] font-semibold leading-8 ${
-                isLightTheme ? "text-[#111111]" : "text-white"
-              }`}
-            >
-              {line}
-            </div>
-          );
-        }
+    currentBlock.push(line);
+  }
 
-        if (/^(🗞️ 来源：|- 来源：)/.test(line)) {
-          return (
-            <div
-              key={`source-${index}`}
-              className={`text-[13px] leading-6 ${
-                isLightTheme ? "text-black/50" : "text-white/50"
-              }`}
-            >
-              {line}
-            </div>
-          );
-        }
+  if (currentBlock.length > 0) {
+    blocks.push(currentBlock);
+  }
 
-        if (/^(🔗 链接：|- 链接：)/.test(line)) {
-          const url = line.replace(/^(🔗 链接：|- 链接：)/, "").trim();
-          return (
-            <div
-              key={`link-${index}`}
-              className={`text-[13px] leading-6 break-all ${
-                isLightTheme ? "text-black/60" : "text-white/60"
-              }`}
-            >
-              <span className={isLightTheme ? "text-black/42" : "text-white/42"}>🔗 链接：</span>
-              <a
-                href={url}
-                target="_blank"
-                rel="noreferrer"
-                className={`underline underline-offset-2 ${
-                  isLightTheme ? "text-[#2563eb] hover:text-[#1d4ed8]" : "text-[#8ab4ff] hover:text-[#a8c7ff]"
-                }`}
-              >
-                {url}
-              </a>
-            </div>
-          );
-        }
+  return blocks;
+}
 
-        if (/^(💡 价值：|- 价值：)/.test(line)) {
-          return (
-            <div
-              key={`value-${index}`}
-              className={`text-[14px] font-medium leading-7 ${
-                isLightTheme ? "text-[#8a5a00]" : "text-[#f3c969]"
-              }`}
-            >
-              {line}
-            </div>
-          );
-        }
+function renderAssistantLine(line, index, isLightTheme, { isIntro = false } = {}) {
+  const labeledLine = parseAssistantLabelLine(line);
+  if (labeledLine) {
+    const labelMap = {
+      source: "来源",
+      summary: "核心",
+      value: "价值",
+      link: "链接",
+      trend: "趋势",
+    };
+    const labelText = labelMap[labeledLine.type] || "说明";
 
-        if (/^(📌 (核心|摘要)：|- (核心|摘要)：)/.test(line)) {
-          return (
-            <div
-              key={`summary-${index}`}
-              className={`text-[15px] leading-7 ${
-                isLightTheme ? "text-[#222222]" : "text-text-primary"
-              }`}
-            >
-              {line}
-            </div>
-          );
-        }
-
-        return (
-          <div
-            key={`body-${index}`}
-            className={`whitespace-pre-wrap text-[15px] leading-7 ${
-              isLightTheme ? "text-[#222222]" : "text-text-primary"
+    if (labeledLine.type === "link") {
+      const url = labeledLine.content;
+      return (
+        <div
+          key={`link-${index}`}
+          className={`text-[14px] leading-6 break-all ${
+            isLightTheme ? "text-[#2563eb]" : "text-[#8ab4ff]"
+          }`}
+        >
+          <span className={`mr-1.5 font-medium ${isLightTheme ? "text-black/45" : "text-white/42"}`}>
+            {labelText}：
+          </span>
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className={`underline underline-offset-2 ${
+              isLightTheme ? "hover:text-[#1d4ed8]" : "hover:text-[#a8c7ff]"
             }`}
           >
-            {line}
+            {url}
+          </a>
+        </div>
+      );
+    }
+
+    if (labeledLine.type === "source") {
+      const { source, meta } = splitSourceMeta(labeledLine.content);
+      return (
+        <div
+          key={`${labeledLine.type}-${index}`}
+          className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] leading-5 ${
+            isLightTheme ? "text-black/52" : "text-white/48"
+          }`}
+        >
+          <span className={`font-medium ${isLightTheme ? "text-black/42" : "text-white/38"}`}>
+            {labelText}
+          </span>
+          {source ? <span>{source}</span> : null}
+          {meta ? <span className={isLightTheme ? "text-black/34" : "text-white/32"}>·</span> : null}
+          {meta ? <span>{meta}</span> : null}
+        </div>
+      );
+    }
+
+    return (
+      <div
+        key={`${labeledLine.type}-${index}`}
+        className={`text-[14px] leading-7 ${
+          isLightTheme ? "text-[#1f1f1f]" : "text-text-primary"
+        }`}
+      >
+        <span className={`mr-1.5 font-medium ${isLightTheme ? "text-black/45" : "text-white/42"}`}>
+          {labelText}：
+        </span>
+        <span>{labeledLine.content}</span>
+      </div>
+    );
+  }
+
+  if (isAssistantItemTitle(line)) {
+    const { marker, content } = extractAssistantTitleParts(line);
+    return (
+      <div
+        key={`title-${index}`}
+        className="flex items-start gap-2.5"
+      >
+        {marker ? (
+          <span
+            className={`mt-0.5 inline-flex items-center justify-center text-[13px] leading-5 ${
+              isEmojiMarker(marker)
+                ? ""
+                : isLightTheme
+                  ? "font-semibold text-black/58"
+                  : "font-semibold text-white/68"
+            }`}
+          >
+            {marker}
+          </span>
+        ) : null}
+        <span
+          className={`min-w-0 flex-1 text-[16px] font-semibold leading-7 tracking-[-0.01em] ${
+            isLightTheme ? "text-[#111111]" : "text-white"
+          }`}
+        >
+          {content}
+        </span>
+      </div>
+    );
+  }
+
+  if (isAssistantLeadLine(line)) {
+    return (
+      <div
+        key={`lead-${index}`}
+        className={`text-[15px] font-medium leading-7 ${
+          isLightTheme ? "text-[#111111]" : "text-white"
+        }`}
+      >
+        {line}
+      </div>
+    );
+  }
+
+  if (/^[-*•]\s+/.test(line)) {
+    const content = line.replace(/^[-*•]\s+/, "").trim();
+    return (
+      <div
+        key={`bullet-${index}`}
+        className={`flex gap-2 text-[14px] leading-7 ${
+          isLightTheme ? "text-[#222222]" : "text-text-primary"
+        }`}
+      >
+        <span className={`mt-[7px] h-1.5 w-1.5 rounded-full ${isLightTheme ? "bg-black/35" : "bg-white/35"}`} />
+        <span className="min-w-0 flex-1">{content}</span>
+      </div>
+    );
+  }
+
+  if (/^(总结|结论|建议|适合|下一步)[:：]/.test(line)) {
+    const [label, ...rest] = line.split(/[:：]/);
+    return (
+      <div
+        key={`section-${index}`}
+        className={`text-[14px] leading-7 ${
+          isLightTheme ? "text-[#1f1f1f]" : "text-text-primary"
+        }`}
+      >
+        <span className={`mr-1.5 font-medium ${isLightTheme ? "text-[#111111]" : "text-white"}`}>
+          {label}：
+        </span>
+        <span>{rest.join("：").trim()}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      key={`${isIntro ? "intro" : "body"}-${index}`}
+      className={`whitespace-pre-wrap text-[14px] leading-7 ${
+        isIntro
+          ? isLightTheme
+            ? "text-black/70"
+            : "text-white/68"
+          : isLightTheme
+            ? "text-[#222222]"
+            : "text-text-primary"
+      }`}
+    >
+      {line}
+    </div>
+  );
+}
+
+function renderAssistantTextBlock(text, isLightTheme) {
+  const blocks = splitAssistantBlocks(text);
+
+  return (
+    <div className="space-y-5">
+      {blocks.map((block, blockIndex) => {
+        const isItemBlock = isAssistantItemTitle(block[0] || "");
+        return (
+          <div
+            key={`block-${blockIndex}`}
+            className={`space-y-2.5 ${
+              isItemBlock
+                ? `${blockIndex > 0 ? (isLightTheme ? "border-t border-black/8 pt-5" : "border-t border-white/10 pt-5") : "pt-1"}`
+                : ""
+            }`}
+          >
+            {block.map((line, lineIndex) => renderAssistantLine(line, `${blockIndex}-${lineIndex}`, isLightTheme, {
+              isIntro: !isItemBlock && blockIndex === 0 && lineIndex === 0,
+            }))}
           </div>
         );
       })}
